@@ -55,14 +55,15 @@
     real (kind=RKIND), dimension(:), pointer, intent(out) :: field
 
     real(kind=4), intent(in) :: scalefactor
-    real(kind=4), dimension(:,:,:), allocatable :: rarray, temparray
+    real(kind=4), dimension(:,:,:), allocatable :: rarray 
+    real(kind=4), dimension(:,:,:), pointer :: temparray
     integer :: iTileStart, jTileStart, iTileEnd, jTileEnd, iCheckStart, iCheckEnd, jCheckStart, jCheckEnd, i, j, l, u, iCell, nti, ntj, istatus, stride
     real (kind=RKIND) :: lat_pt, lon_pt, lat_min, lat_max, lon_min, lon_max, tdim, tile_w, tile_h
     integer, dimension(:), allocatable :: num
     logical :: closest
 
     type(lru_list) :: tilecache
-    class(key), pointer :: keyptr
+    class(key), pointer :: keyptr, tptr
 
 
     write (0,*) "Enter foo"
@@ -133,7 +134,7 @@
         iTileStart = iCheckStart - mod(iCheckStart, nx) + 1 
         jTileStart = jCheckStart - mod(jCheckStart, ny) + 1 
         allocate(rarray(iTileStart - nh:iTileStart+nx*nti+nh-1, jTileStart-nh:jTileStart+ny*ntj+nh-1, nz))
-        allocate(temparray(nx+2*nh,ny+2*nh,1))
+        !allocate(temparray(nx+2*nh,ny+2*nh,1))
 
         stride = 1
 !        if (nti > 7) then
@@ -154,23 +155,42 @@
         ITILE: do i=1, nti
         jTileStart = jCheckStart - mod(jCheckStart, ny) + 1 
         JTILE: do j=1, ntj
-            iTileEnd = iTileStart + nx - 1
-            jTileEnd = jTileStart + ny - 1
-            !write(0,*) "foo, latmax = ", lat_max, " latmin = ", lat_min, " lonmax = ", lon_max, "lon_min = ", lon_min
-            !write(0,*) "iTileStart, end: ", iTileStart, iTileEnd, " jTileStart, end: ", jTileStart, jTileEnd
-            !write(0,*) iTileStart - nh, ":", iTileEnd + nh, jTileStart - nh, ":", jTileEnd + nh
+            keyptr => tile_key(iTileStart, jTileStart, nx, ny)
+            if (tilecache%hit(keyptr)) then
+                tptr => tilecache%get(keyptr)
+                select type (tptr)
+                type is (tile_key)
+                    temparray => tptr%getData()
+                class default
+                    print *, "error, wrong key type"
+                end select
+            else
+                iTileEnd = iTileStart + nx - 1
+                jTileEnd = jTileStart + ny - 1
+                !write(0,*) "foo, latmax = ", lat_max, " latmin = ", lat_min, " lonmax = ", lon_max, "lon_min = ", lon_min
+                !write(0,*) "iTileStart, end: ", iTileStart, iTileEnd, " jTileStart, end: ", jTileStart, jTileEnd
+                !write(0,*) iTileStart - nh, ":", iTileEnd + nh, jTileStart - nh, ":", jTileEnd + nh
 
-            write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-                 trim(geog_sub_path),mod(iTileStart,43200),'-',mod(iTileEnd-1,43200)+1 ,'.',jTileStart,'-',jTileEnd
-            write(0,*) trim(fname)
-            
-            u=nx+2*nh
-            l=ny+2*nh
-            !call fake_fill(temparray, jTileStart - 3)
-            call read_geogrid(fname, len_trim(fname), temparray, u, l, nz, isigned, endian, scalefactor, wordsize, istatus)
-            call init_atm_check_read_error(istatus, fname)
-            !write(0,*) "Read success, max(temparray) = ", maxval(temparray),", min: ", minval(temparray), "temparray(10,10,1)", temparray(10,10,1)
-            rarray(iTileStart - nh:iTileEnd+nh, jTileStart - nh:jTileEnd + nh, :) = temparray
+                write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+                     trim(geog_sub_path),mod(iTileStart,43200),'-',mod(iTileEnd-1,43200)+1 ,'.',jTileStart,'-',jTileEnd
+                write(0,*) trim(fname)
+                
+                u=nx+2*nh
+                l=ny+2*nh
+                !call fake_fill(temparray, jTileStart - 3)
+                call read_geogrid(fname, len_trim(fname), temparray, u, l, nz, isigned, endian, scalefactor, wordsize, istatus)
+                call init_atm_check_read_error(istatus, fname)
+                !write(0,*) "Read success, max(temparray) = ", maxval(temparray),", min: ", minval(temparray), "temparray(10,10,1)", temparray(10,10,1)
+                tptr => tile_key(iTileStart, jTileStart, nx, ny, temparray)
+                call tilecache%lru_insert(tptr)
+                deallocate(tptr)
+            end if
+            deallocate(keyptr)
+            if(associated(temparray)) then
+                rarray(iTileStart - nh:iTileEnd+nh, jTileStart - nh:jTileEnd + nh, :) = temparray
+            else
+                print *, "error, temparray not associated"
+            end if
             jTileStart = jTileStart + ny
 
         end do JTILE

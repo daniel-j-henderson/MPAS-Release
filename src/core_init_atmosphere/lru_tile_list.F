@@ -1,10 +1,10 @@
 module tilekey_mod
     use key_mod
-    use mpas_kind_types, only: RKIND
+    integer, parameter :: KKIND=4
     type, extends (key) :: tile_key
         integer :: i, j
         integer :: nx, ny
-        real(kind=RKIND), dimension(:,:,:), pointer :: tile_data
+        real(kind=KKIND), dimension(:,:,:), pointer :: tile_data
         contains
             procedure :: setTile
             procedure :: getData
@@ -20,21 +20,21 @@ module tilekey_mod
         function tileconstructor(i, j, nx, ny, t)
             class(tile_key), pointer :: tileconstructor
             integer :: i, j, nx, ny
-            real(kind=RKIND), dimension(:,:,:), pointer :: t
+            real(kind=KKIND), dimension(:,:,:), pointer, optional :: t
 
             allocate(tileconstructor)
             tileconstructor%i = i
             tileconstructor%j = j
             tileconstructor%nx = nx
             tileconstructor%ny = ny
-            tileconstructor%tile_data => t
+            if(present(t)) tileconstructor%tile_data => t
 
         end function tileconstructor
 
         subroutine setTile(this, i, j, nx, ny, t)
             class(tile_key) :: this
             integer :: i, j, nx, ny
-            real(kind=RKIND), dimension(:,:,:), pointer :: t
+            real(kind=KKIND), dimension(:,:,:), pointer :: t
 
             this%i = i
             this%j = j
@@ -45,7 +45,7 @@ module tilekey_mod
 
         function getData(this)
             class(tile_key) :: this
-            real(kind=RKIND), dimension(:,:,:), pointer :: getData
+            real(kind=KKIND), dimension(:,:,:), pointer :: getData
 
             getData => this%tile_data
         end function

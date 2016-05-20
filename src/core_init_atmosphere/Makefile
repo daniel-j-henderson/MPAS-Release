@@ -14,7 +14,9 @@ OBJS = mpas_init_atm_core.o \
        read_geogrid.o \
        mpas_atmphys_date_time.o \
        mpas_atmphys_initialize_real.o \
-       mpas_atmphys_utilities.o
+       mpas_atmphys_utilities.o \
+	   poly_list.o \
+	   lru_tile_list.o
 
 all: core_hyd
 
@@ -67,7 +69,14 @@ mpas_init_atm_static.o: \
 	mpas_atm_advection.o \
 	mpas_init_atm_hinterp.o \
 	mpas_init_atm_llxy.o \
-	mpas_atmphys_utilities.o
+	mpas_atmphys_utilities.o \
+	poly_list.o \
+    lru_tile_list.o
+
+poly_list.o:
+
+lru_tile_list.o: \
+	poly_list.o
 
 mpas_init_atm_surface.o: \
 	mpas_init_atm_hinterp.o  \
