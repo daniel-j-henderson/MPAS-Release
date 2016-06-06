@@ -40,6 +40,31 @@ module test_core
       type (MPAS_Time_Type) :: startTime
       integer :: iErr
 
+      character (len=StrKIND) :: datestring
+      type (MPAS_Time_Type) :: ref_time
+      integer :: n
+      type (MPAS_timeInterval_type) :: num, den, rem
+      integer :: start_time, stop_time, rate
+
+      datestring = "0000-01-01_00:00:00"
+      call mpas_set_time(ref_time, dateTimeString=datestring)
+      call mpas_set_timeInterval(num, YY=100)
+      call mpas_set_timeInterval(den, S=1)
+
+      call system_clock(count_rate=rate)
+      call system_clock(count=start_time)
+      call mpas_interval_division(ref_time, num, den, n, rem, 1)
+      call system_clock(count=stop_time)
+      call mpas_get_timeInterval(rem, timeString=datestring)
+      write(0,*) 'elapsed interval division time: ', real((stop_time - start_time),kind=RKIND) / real(rate,kind=RKIND)
+      write(0,*) "n = ", n, " rem = ", datestring
+
+      call system_clock(count=start_time)
+      call mpas_interval_division(ref_time, num, den, n, rem, 2)
+      call system_clock(count=stop_time)
+      call mpas_get_timeInterval(rem, timeString=datestring)
+      write(0,*) 'Daniel method elapsed interval division time: ', real((stop_time - start_time),kind=RKIND) / real(rate,kind=RKIND)
+      write(0,*) "n = ", n, " rem = ", datestring
 
       iErr = 0
 

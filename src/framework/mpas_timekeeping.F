@@ -1502,7 +1502,7 @@ module mpas_timekeeping
    !> the number of intervals that fit into another interval.
    !>
    !-----------------------------------------------------------------------
-   subroutine mpas_interval_division(ref_time, num, den, n, rem)
+   subroutine mpas_interval_division(ref_time, num, den, n, rem, method)
 
       implicit none
 
@@ -1510,16 +1510,22 @@ module mpas_timekeeping
       type (MPAS_TimeInterval_type), intent(in) :: num
       type (MPAS_TimeInterval_type), intent(in) :: den
       integer, intent(out) :: n
+      integer, intent(in), optional :: method
       type (MPAS_TimeInterval_type), intent(out) :: rem
 
       type (MPAS_TimeInterval_type) :: newNum, newDen
       integer :: days, secondsNum, secondsDen
       integer (kind=I8KIND) :: seconds
-
       if ( num % ti % YR == 0 .and. num % ti % MM == 0 .and. den % ti % YR == 0 .and. den % ti % MM == 0 ) then
           call mpas_interval_division_log(num, den, n, rem)
       else
-          call mpas_interval_division_linear(ref_time, num, den, n, rem)
+          if(.not. present(method) .or. method == 1) then
+            call mpas_interval_division_linear(ref_time, num, den, n, rem)
+          else if(present(method) .and. method == 2) then 
+            call mpas_interval_division_linear_daniel(ref_time, num, den, n, rem)
+          else 
+            write(0,*) "Error, wrong method"
+          end if
       end if
 
    end subroutine mpas_interval_division
@@ -1627,13 +1633,16 @@ module mpas_timekeeping
       integer, intent(out) :: n
       type (MPAS_TimeInterval_type), intent(out) :: rem
 
-      integer :: m
+      integer :: m, i, nr
+      integer (kind=8) :: t1, t2, cntrate
 
       type (MPAS_Time_type) :: target_time
       type (MPAS_Time_type) :: updated_time, mid_time
 
       type (MPAS_TimeInterval_type) :: temp, mid_int
       type (MPAS_TimeInterval_type) :: zero
+
+      call system_clock(t1, cntrate)
 
       target_time = ref_time + num
 
@@ -1677,14 +1686,21 @@ module mpas_timekeeping
       ! Final number of interavls is n + m
       n = n + m
 
+      call system_clock(t2)
+      write (0,*) "Section A time: ", real(t2-t1) / real(cntrate)
+
       ! Do a final linear search, just to ensure we aren't missing any divisions.
       temp = den * n
       updated_time = ref_time + temp
 
+      i=0
       do while (target_time > updated_time)
          n = n + 1
+         i=i+1
          updated_time = updated_time + den
       end do
+      call system_clock(t1)
+      write (0,*) "Section B.1 time: ", real(t1-t2) / real(cntrate), i
 
       ! Here, if updated_time is larger than target time. Need to subtract den once, and compute remainder
       if ( updated_time > target_time ) then
@@ -1695,8 +1711,89 @@ module mpas_timekeeping
          call mpas_set_timeInterval(rem, S=0)
       end if
 
+      call system_clock(t1)
+      write (0,*) "Section B time: ", real(t1-t2) / real(cntrate)
+
       return
    end subroutine mpas_interval_division_linear
+
+   subroutine mpas_interval_division_linear_daniel(ref_time, num, den, n, rem)
+
+      implicit none
+
+      type (MPAS_Time_type), intent(in) :: ref_time
+      type (MPAS_TimeInterval_type), intent(in) :: num
+      type (MPAS_TimeInterval_type), intent(in) :: den
+      integer, intent(out) :: n
+      type (MPAS_TimeInterval_type), intent(out) :: rem
+
+      integer :: m, i, nr
+      integer (kind=8) :: t1, t2, cntrate
+
+      type (MPAS_Time_type) :: target_time
+      type (MPAS_Time_type) :: updated_time, mid_time
+
+      type (MPAS_TimeInterval_type) :: temp, mid_int
+      type (MPAS_TimeInterval_type) :: zero
+
+      write (0,*) "Enter Daniel method"
+
+      target_time = ref_time + num
+
+      updated_time = ref_time + den
+
+      n = 0
+
+      ! If the denominator is larger than the numerator, return 0 intervals,
+      ! and the numerator as the remainder
+      if ( target_time < updated_time ) then
+         rem = num
+         return
+      end if
+
+      ! One interval of den already fits into num
+      n = n + 1
+      temp = den
+
+      ! Search forward, doubling the interval each time.
+      do while (target_time > updated_time)
+         n = n * 2
+         temp = den * n
+         updated_time = ref_time + temp
+      end do
+
+      ! Setup midpoint of search
+      ! The last value of n puts updated_time after target_time, need to back off and find the final time.
+      n = n / 2
+      m = n
+      mid_int = den * n
+      temp = mid_int
+      updated_time = ref_time + mid_int + temp
+
+      ! Seach backward, halving the interval each time.
+      do while (target_time < updated_time)
+         m  = m / 2
+         temp = den * m
+         updated_time = ref_time + mid_int + temp
+      end do
+
+      ! Final number of interavls is n + m
+      n = n + m
+
+
+      ! Do a final linear search, just to ensure we aren't missing any divisions.
+      temp = den * n
+      updated_time = ref_time + temp
+
+      temp = target_time - updated_time
+      if (target_time == updated_time) then
+         call mpas_set_timeInterval(rem, S=0)
+         return
+      end if
+      call mpas_interval_division(updated_time, temp, den, nr, rem, 2)
+      n = n+nr
+      return
+   end subroutine mpas_interval_division_linear_daniel
 
 
    logical function eq_t_t(t1, t2)
