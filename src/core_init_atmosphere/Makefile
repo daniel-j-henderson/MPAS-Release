@@ -71,6 +71,7 @@ mpas_init_atm_static.o: \
 	mpas_init_atm_llxy.o \
 	mpas_atmphys_utilities.o \
 	poly_list.o \
+	rdtsc.o \
     lru_tile_list.o
 
 poly_list.o:

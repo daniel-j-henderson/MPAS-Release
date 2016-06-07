@@ -1,13 +1,13 @@
 module tilekey_mod
     use key_mod
-    integer, parameter :: KKIND=4
     type, extends (key) :: tile_key
         integer :: i, j
         integer :: nx, ny
-        real(kind=KKIND), dimension(:,:,:), pointer :: tile_data
+        real(kind=4), dimension(:,:,:), pointer :: tile_data
         contains
             procedure :: setTile
             procedure :: getData
+            procedure :: deletekey => tileDelete
             procedure :: equals => tileKeyEquals
     end type tile_key
 
@@ -17,25 +17,29 @@ module tilekey_mod
 
     contains
 
+        subroutine tileDelete(this)
+            class(tile_key) :: this
+            if (associated(this%tile_data)) deallocate(this%tile_data)
+        end subroutine tileDelete
+
         function tileconstructor(i, j, nx, ny, t)
             class(tile_key), pointer :: tileconstructor
             integer :: i, j, nx, ny
-            real(kind=KKIND), dimension(:,:,:), pointer, optional :: t
-
+            real(kind=4), dimension(:,:,:), pointer, optional :: t
             allocate(tileconstructor)
+            tileconstructor%tile_data => null()
             tileconstructor%i = i
             tileconstructor%j = j
             tileconstructor%nx = nx
             tileconstructor%ny = ny
-            if(present(t)) tileconstructor%tile_data => t
+            if(present(t) .and. associated(t)) tileconstructor%tile_data => t
 
         end function tileconstructor
 
         subroutine setTile(this, i, j, nx, ny, t)
             class(tile_key) :: this
             integer :: i, j, nx, ny
-            real(kind=KKIND), dimension(:,:,:), pointer :: t
-
+            real(kind=4), dimension(:,:,:), pointer :: t
             this%i = i
             this%j = j
             this%nx = nx
@@ -45,8 +49,7 @@ module tilekey_mod
 
         function getData(this)
             class(tile_key) :: this
-            real(kind=KKIND), dimension(:,:,:), pointer :: getData
-
+            real(kind=4), dimension(:,:,:), pointer :: getData
             getData => this%tile_data
         end function
 
@@ -54,7 +57,6 @@ module tilekey_mod
             class(tile_key), intent(in) :: this
             class(key), intent(in) :: other
             logical :: tileKeyEquals
-
             select type(other)
             type is (tile_key)
                 tileKeyEquals = .true.
@@ -80,6 +82,7 @@ module lrulist_mod
     type, extends(list) :: lru_list
         integer, public :: capacity
         integer :: label
+        real, public :: tinsert, thit, tremove, tget
         contains
         procedure :: lru_insert
         procedure :: hit
@@ -93,6 +96,8 @@ module lrulist_mod
         class(lru_list), intent(inout) :: this
         class(key), pointer, intent(in) :: value
         class(node), pointer :: new
+        integer(kind=8) :: t1, t2, cntrate
+        call system_clock(t1, cntrate) 
         if (this%s == this%capacity) then
             call this%lru_remove()
         end if
@@ -106,6 +111,8 @@ module lrulist_mod
             this%label = this%label+1
             call this%insert(value)
         end if
+        call system_clock(t2)
+        this%tinsert = this%tinsert + real(t2 - t1) / real(cntrate)
     end subroutine lru_insert
 function hit(this, value)
         class(lru_list) :: this
@@ -114,7 +121,8 @@ function hit(this, value)
         class(key), pointer :: temp
         logical :: hit
         integer :: i, x, y
-
+        integer(kind=8) :: t1, t2, cntrate
+        call system_clock(t1, cntrate)
         i=this%s
         hit = .false.
         curr => this%head
@@ -137,6 +145,8 @@ function hit(this, value)
         if (associated(temp)) then
             deallocate(temp)
         end if
+        call system_clock(t2)
+        this%thit = this%thit + real(t2 - t1) / real(cntrate)
     end function hit
                        
     subroutine lru_remove(this)
@@ -145,7 +155,8 @@ function hit(this, value)
         class(key), pointer :: del, temp
         class(node), pointer :: curr
         real(kind=8), dimension(:,:,:), pointer :: arr
-
+        integer(kind=8) :: t1, t2, cntrate
+        call system_clock(t1, cntrate)
         curr => this%head
         del => curr%getKey()
         temp => del
@@ -162,8 +173,11 @@ function hit(this, value)
             i = i-1
         end do
         temp => this%remove(del)
+        call temp%deletekey()
         deallocate(temp)
         deallocate(del)
+        call system_clock(t2)
+        this%tremove = this%tremove + real(t2 - t1) / real(cntrate)
     end subroutine lru_remove
 
     function get(this, value)
@@ -171,7 +185,8 @@ function hit(this, value)
         class(key), pointer :: get, value
         integer :: i
         class(node), pointer :: curr
-
+        integer(kind=8) :: t1, t2, cntrate
+        call system_clock(t1, cntrate)
         curr => this%head
         i=this%s
         do while (i > 0)
@@ -184,6 +199,8 @@ function hit(this, value)
             end if
             i = i-1
         end do
+        call system_clock(t2)
+        this%tget = this%tget + real(t2 - t1) / real(cntrate)
     end function get
 
 end module lrulist_mod

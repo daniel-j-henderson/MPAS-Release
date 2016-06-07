@@ -18,7 +18,7 @@
  use mpas_atmphys_utilities
 
  implicit none
- private :: foo, fake_fill
+ private :: foo, foo2, get_tile, con_lx, isClosest, div_and_conq
  public:: init_atm_static,           &
           init_atm_static_orogwd,    &
           init_atm_check_read_error, &
@@ -28,22 +28,323 @@
  contains
 
 
- subroutine fake_fill(array, start)
-    real(kind=4), dimension(:,:,:), intent(inout) :: array
-    integer, intent(in) :: start
+
+ function get_tile(i, j, cache, nx, ny, nz, nh, data_p, sub_p, isigned, endian, scalefactor, wordsize)
+    use tilekey_mod
+    use lrulist_mod
+    implicit none
+    real(kind=4), dimension(:,:,:), pointer :: get_tile
+    integer, intent(in) :: i, j, nx, ny, nh, nz
+    type(lru_list), intent(inout) :: cache
+    character(len=StrKIND+1), intent(in) :: data_p, sub_p
+    real(kind=4), intent(in) :: scalefactor
+    integer, intent(in) :: endian,isigned,wordsize
+
+    character(len=StrKIND) :: fname
+    class(key), pointer :: keyptr, tptr
+    integer :: istatus, u, l
+    
+    keyptr => tile_key(i, j, nx, ny)
+    if (cache%hit(keyptr)) then
+        tptr => cache%get(keyptr)
+        select type (tptr)
+        type is (tile_key)
+            get_tile => tptr%getData()
+        class default
+            write(0,*), "error, wrong key type"
+        end select
+    else
+        write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(data_p)// &
+                     trim(sub_p),mod(i,43200),'-',mod(i+nx-1-1,43200)+1,'.',j,'-',j+ny-1
+        write(0,*) trim(fname)
+        allocate(get_tile(nx+2*nh, ny+2*nh, 1))
+        call read_geogrid(fname, len_trim(fname), get_tile, nx+2*nh, ny+2*nh, nz, isigned, endian, scalefactor, wordsize, istatus)
+        call init_atm_check_read_error(istatus, fname)
+        write (0,*) "Read success"
+        tptr => tile_key(i, j, nx, ny, get_tile)
+        call cache%lru_insert(tptr)
+    end if
+
+    deallocate(tptr)
+    deallocate(keyptr)
+
+ end function get_tile
+
+
+ function isClosest(lat_pt, lon_pt, latCell, lonCell, nEoC, CoC, iCell)
+    logical :: isClosest
+    real(kind=RKIND), intent(in) :: lat_pt, lon_pt
+    real(kind=RKIND), dimension(:), pointer, intent(in) :: latCell, lonCell
+    integer, intent(in) :: nEoC, iCell
+    integer, dimension(:), intent(in) :: CoC
+
+    real(kind=RKIND) :: dist
     integer :: i
-    array(:,:,:) = 0.0
-    do i=1,1206
-        array(:,i,:) = start+i
+
+
+    isClosest = .true.
+
+    dist = sphere_distance(lat_pt, lon_pt, latCell(iCell), lonCell(iCell), 100.0)
+    do i=1,nEoC
+        if (sphere_distance(lat_pt, lon_pt, latCell(CoC(i)), lonCell(CoC(i)), 100.0) < dist) then
+            isClosest = .false.
+            exit
+        end if
     end do
- end subroutine fake_fill 
+ end function isClosest
+
+ recursive subroutine div_and_conq(mask, istart, iend, jstart, jend, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+    implicit none
+    logical, dimension(:,:,:), intent(out) :: mask
+    integer, intent(in) :: istart, iend, jstart, jend, ioffset, joffset, nEoC, iCell
+    integer, dimension(:), intent(in) :: CoC
+    real(kind=RKIND), dimension(:), pointer, intent(in) :: latCell, lonCell
+
+    real(kind=RKIND) :: lat_pt, lon_pt, lat_cell, lon_cell, x_cell, y_cell, z_cell, dist, tdim=0.0083333333, r=100.0
+    real(kind=RKIND), dimension(:,:,:), allocatable :: lat_arr, lon_arr, dist2_icell_arr, dist2_ocell_arr
+    logical :: closest = .true.
+    integer :: isplit, jsplit, i, j, l, nz=1
+
+    closest = .true.
+    lat_pt = -89.99583 + jstart * tdim
+    lat_pt = lat_pt * PI / 180.0
+    lon_pt = -179.99583 + istart * tdim
+    lon_pt = lon_pt * PI / 180.0
+    if (.not. isClosest(lat_pt, lon_pt, latCell, lonCell, nEoC, CoC, iCell)) then
+        closest = .false. 
+    end if
+
+    lat_pt = -89.99583 + jend * tdim
+    lat_pt = lat_pt * PI / 180.0
+    lon_pt = -179.99583 + istart * tdim
+    lon_pt = lon_pt * PI / 180.0
+    if (closest .and. .not. isClosest(lat_pt, lon_pt, latCell, lonCell, nEoC, CoC, iCell)) then
+        closest = .false. 
+    end if
+
+    lat_pt = -89.99583 + jstart * tdim
+    lat_pt = lat_pt * PI / 180.0
+    lon_pt = -179.99583 + iend * tdim
+    lon_pt = lon_pt * PI / 180.0
+    if (closest .and. .not. isClosest(lat_pt, lon_pt, latCell, lonCell, nEoC, CoC, iCell)) then
+        closest = .false. 
+    end if
+
+    lat_pt = -89.99583 + jend * tdim
+    lat_pt = lat_pt * PI / 180.0
+    lon_pt = -179.99583 + iend * tdim
+    lon_pt = lon_pt * PI / 180.0
+    if (closest .and. .not. isClosest(lat_pt, lon_pt, latCell, lonCell, nEoC, CoC, iCell)) then
+        closest = .false. 
+    end if
+
+    if (closest) then
+!        mask((istart-ioffset):(iend-ioffset), (jstart-joffset):(jend-joffset),:) = .true.
+        return
+    else
+        if (iend - istart < 5 .or. jend - jstart < 5) then
+            if(iend - istart > 5) then
+                isplit = (iend - istart) / 2 + istart
+                call div_and_conq(mask, istart, isplit, jstart, jend, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+                call div_and_conq(mask, isplit+1, iend, jstart, jend, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+            else if(jend - jstart > 5) then
+                jsplit = (jend - jstart) / 2 + jstart
+                call div_and_conq(mask, istart, iend, jsplit+1, jend, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+                call div_and_conq(mask, istart, iend, jstart, jsplit, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+            else
+                do j=jstart, jend
+                lat_pt = -89.99583 + (j-1) * tdim
+                lat_pt = lat_pt * PI / 180.0
+                do i=istart, iend
+                    lon_pt = -179.99583 + (i-1) * tdim
+                    lon_pt = lon_pt * PI / 180.0
+                    if(.not. isClosest(lat_pt, lon_pt, latCell, lonCell, nEoC, CoC, iCell)) mask(i-ioffset,j-joffset,:) = .false.
+                end do
+                end do
+                return
+            end if
+        else
+            isplit = (iend - istart) / 2 + istart
+            jsplit = (jend - jstart) / 2 + jstart
+            call div_and_conq(mask, istart, isplit, jstart, jsplit, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+            call div_and_conq(mask, istart, isplit, jsplit+1, jend, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+            call div_and_conq(mask, isplit+1, iend, jstart, jsplit, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+            call div_and_conq(mask, isplit+1, iend, jsplit+1, jend, ioffset, joffset, nEoC, CoC, latCell, lonCell, iCell)
+        end if
+    end if
+
+ end subroutine div_and_conq
+
+ subroutine foo2(geog_data_path, geog_sub_path, nx, ny, nz, nh, &
+                 field, nCats, isigned, endian, scalefactor, wordsize)
+    
+ integer, pointer :: nCells, nEdges, nVertices, nCellsSolve
+ 
+ integer, dimension(:), pointer :: nEdgesOnCell
+ integer, dimension(:,:), pointer :: cellsOnCell, cellsOnVertex, verticesOnCell, edgesOnVertex
+ real (kind=RKIND), dimension(:), pointer :: xCell, yCell, zCell
+ real (kind=RKIND), dimension(:), pointer :: xEdge, yEdge, zEdge
+ real (kind=RKIND), dimension(:), pointer :: latCell, lonCell
+ real (kind=RKIND), dimension(:), pointer :: latVertex, lonVertex
+ real (kind=RKIND), dimension(:), pointer :: latEdge, lonEdge
+ integer, dimension(:), allocatable :: borderVertices
+ type(list) ::bvertslist
+ class(key), pointer :: keyptr
+ 
+
+ call mpas_pool_get_array(mesh, 'xCell', xCell)
+ call mpas_pool_get_array(mesh, 'yCell', yCell)
+ call mpas_pool_get_array(mesh, 'zCell', zCell)
+ call mpas_pool_get_array(mesh, 'latCell', latCell)
+ call mpas_pool_get_array(mesh, 'lonCell', lonCell)
+ call mpas_pool_get_array(mesh, 'latEdge', latEdge)
+ call mpas_pool_get_array(mesh, 'lonEdge', lonEdge)
+ call mpas_pool_get_array(mesh, 'latVertex', latVertex)
+ call mpas_pool_get_array(mesh, 'lonVertex', lonVertex)
+ 
+ call mpas_pool_get_array(mesh, 'nEdgesOnCell', nEdgesOnCell)
+ call mpas_pool_get_array(mesh, 'cellsOnCell', cellsOnCell)
+ call mpas_pool_get_array(mesh, 'cellsOnVertex', cellsOnVertex)
+ call mpas_pool_get_array(mesh, 'edgesOnVertex', edgesOnVertex)
+
+ call mpas_pool_get_dimension(dims, 'nCells', nCells)
+ call mpas_pool_get_dimension(dims, 'nEdges', nEdges)
+ call mpas_pool_get_dimension(dims, 'nVertices', nVertices)
+ call mpas_pool_get_dimension(dims, 'nCellsSolve', nCellsSolve) 
+
+ do i=nCellsSolve+1, nCells
+ do j=1,nEdgesOnCell(i)
+ do k=1,vertexDegree
+    temp = cellsOnVertex(k, verticesOnCell(j,i))
+    if(temp <= nCellsSolve) then
+        keyptr => int_key(0,temp)
+        if (.not. bvertslist%contains(keyptr)) then
+            call bvertslist%insert(keyptr)
+            lon_cell = lonCell(i)
+            lat_cell = latCell(i)
+            if (lon_cell > lon_max) then
+                lon_max = lon_cell
+            else if(lon_cell < lon_min) then
+                lon_min = lon_cell
+            end if
+
+            if (lat_cell > lat_max) then
+                lat_max = lat_cell
+            else if (lat_cell < lat_min) then   
+                lat_min = lat_cell
+            end if
+
+            exit
+        end if
+        deallocate(keyptr)
+    end if
+ end do
+
+ nBorderVertices = bvertslist%size()
+ allocate(borderVertices(nBorderVertices))
+ do i=1,nBorderVertices
+     keyptr => bvertslist%removeFirst()
+    borderVertices(i) = keyptr%getValue
+    deallocate keyptr
+ end do
+
+ lat_min = lat_min * 180.0 / PI
+ lat_max = lat_max * 180.0 / PI
+ lon_min = lon_min * 180.0 / PI
+ lon_max = lon_max * 180.0 / PI
+ iRegionStart = floor((lon_min + 180.0) / tdim)
+ iRegionEnd = ceiling((lon_max + 180.0) / tdim)
+ jRegionStart = floor((lat_min + 90.0) / tdim)
+ jRegionEnd = ceiling((lat_max + 90.0) / tdim)
+ ! These are the i, j bounding values in the space of the geographical
+ ! dataset. I expand the bounding box by an arbitrary amount on all sides
+ ! to avoid cutting off any necessary data. This amount may need
+ ! calibrated.
+
+! Check to see if the pole is in the region. If so, expand region start/end to
+! the pole.
+! polecap=.false.
+! if (isClosest(PI/2, 1.0, latCell, lonCell, nEoC, CoC, iCell)) then
+!     lat_max = 180.0
+!     jCheckEnd = 21600
+!     polecap=.true.
+!     write (0,*) "North Pole"
+! end if
+! if (isClosest(PI/(-2), 1.0, latCell, lonCell, nEoC, CoC, iCell)) then
+!     jCheckStart = 1
+!     lat_min = -180.0
+!     polecap = .true.
+!     write (0,*) "South Pole"
+! end if
+! if (polecap) then
+!     iCheckstart=1
+!     iCheckEnd=43200
+! end if
+
+ ! This just makes finding nti, ntj simpler
+ if (mod(iCheckStart, nx) == 0) iRegionStart = iRegionStart - 1 
+ if (mod(jCheckStart, ny) == 0) jRegionStart = jRegionStart - 1
+
+ nti = (iRegionEnd - 1) / nx - iRegionStart / nx + 1
+ ntj = (jRegionEnd - 1) / ny - jRegionStart / ny + 1
+ iTileStart = iRegionStart - mod(iRegionStart, nx) + 1 
+ jTileStart = jRegionStart - mod(jRegionStart, ny) + 1 
+ lat_cell = latCell(iCell)
+ lon_cell = lonCell(iCell)
+
+ lat_min = lat_min * PI / 180.0
+ lat_max = lat_max * PI / 180.0
+ lon_min = lon_min * PI / 180.0
+ lon_max = lon_max * PI / 180.0
+
+lon_pt = -179.99583 + (i-1) * tdim
+            lon_pt = lon_pt * PI / 180.0
+
+            lon_arr(i,:,:) = lon_pt
+        end do
+
+        do j=jCheckStart,jCheckEnd
+            lat_pt = -89.99583 + (j-1) * tdim
+            lat_pt = lat_pt * PI / 180.0
+
+ do i=1,nti
+ do j=1,ntj
+    c_lats(1) = -89.99583 + (jTileStart + (j-1)*ny) * tdim
+    c_lats(2) = -89.99583 + (jTileStart + j*ny - 1) * tdim
+    c_lons(1) = -179.99583 + (iTileStart + (i-1)*nx) * tdim
+    c_lons(2) = -179.99583 + (iTileStart + i*nx-1) * tdim
+    c_lats = c_lats * PI / 180.0
+    c_lons = c_lons * PI / 180.0
+    temp = nInsideCorners(c_lats, c_lons, !other stuff, needs to be able to
+                                          !determine nearest cell to each corner
+    if(temp == 4) then
+        iCheckStart = 1
+        iCheckEnd = nx
+        jCheckStart = 1
+        jCheckEnd = ny
+    else
+        lat_min = 100.0
+        lat_max = -100.0
+        lon_max = 100.0
+        lon_min = -100.0
+        do v=1,nBorderVertices
+            if(latVertex(borderVertices(v)) <= c_lats(2) .and. latVertex(borderVertices(v)) >= c_lats(1)) then
+                if(latVertex(borderVertices(v)) < lat_min) then
+                    lat_min = latVertex(borderVertices(v))
+
+
+
+
+
 
  subroutine foo(geog_data_path, geog_sub_path, nx, ny, nz, nh, nCells, nCellsSolve, nVertices, latCell, lonCell, &
                 latVertex, lonVertex, verticesOnCell, cellsOnCell, nEdgesOnCell, field, nCats, isigned, endian, scalefactor, wordsize)
     use IEEE_ARITHMETIC
     use tilekey_mod
     use lrulist_mod
-    !use mpi, only: MPI_BARRIER
+
+    implicit none
+ 
     character(len=StrKIND+1), intent(in) :: geog_data_path, geog_sub_path
     character(len=StrKIND) :: fname
     integer, intent(in) :: nx, ny, nz, nh, nCells, nVertices, nCats, nCellsSolve
@@ -55,18 +356,40 @@
     real (kind=RKIND), dimension(:), pointer, intent(out) :: field
 
     real(kind=4), intent(in) :: scalefactor
-    real(kind=4), dimension(:,:,:), allocatable :: rarray 
+    real(kind=4), dimension(:,:,:), allocatable :: rarray
+    real(kind=RKIND), dimension(:,:,:), allocatable :: lat_arr, lon_arr, dist2_icell_arr, dist2_ocell_arr
     real(kind=4), dimension(:,:,:), pointer :: temparray
-    integer :: iTileStart, jTileStart, iTileEnd, jTileEnd, iCheckStart, iCheckEnd, jCheckStart, jCheckEnd, i, j, l, u, iCell, nti, ntj, istatus, stride
-    real (kind=RKIND) :: lat_pt, lon_pt, lat_min, lat_max, lon_min, lon_max, tdim, tile_w, tile_h
-    integer, dimension(:), allocatable :: num
-    logical :: closest
+    integer, dimension(:,:,:), allocatable :: int_arr
+    integer :: iTileStart, jTileStart, iTileEnd, jTileEnd, iCheckStart, iCheckEnd, jCheckStart, jCheckEnd,&
+                i, j, l, u, iCell, nti, ntj, istatus, stride, it, jt, x, x2, y, y2, tempint, nEoC
+    real (kind=RKIND) :: lat_pt, lon_pt, lat_min, lat_max, lon_min, lon_max, tdim, tile_w, tile_h, &
+                         dist, lat_cell, lon_cell, x_cell, y_cell, z_cell, r 
+    integer, dimension(:), allocatable :: num, CoC
+    logical :: closest, polecap
+    logical, dimension(:,:,:), allocatable :: mask_arr
 
+    real(kind=8) :: extime
+    integer(kind=8) :: t1, t2, t3, t4, t5, t6, cntrate 
+    integer, parameter :: cacheSize = 5
+    
     type(lru_list) :: tilecache
-    class(key), pointer :: keyptr, tptr
+    character :: mask_method = 'A'
+    integer :: solve_method = 1
 
+    namelist /solve/ solve_method, mask_method
+    open(41,file='namelist.daniel')
+    read(41,solve)
+    close(41)
 
-    write (0,*) "Enter foo"
+    r = 100.0
+    extime = 0.0
+    tilecache%tinsert = 0.0
+    tilecache%thit = 0.0
+    tilecache%tremove = 0.0
+    tilecache%tget = 0.0
+
+    call system_clock(t1, cntrate)
+
     allocate(field(nCells))
     allocate(num(0:nCats))
     field(:) = 0.0
@@ -74,16 +397,19 @@
     tdim = 0.0083333333
     tile_w = nx * tdim
     tile_h = ny * tdim
-    write (0,*) "nCells = ", nCells, ", nCellsSolve = ", nCellsSolve
+    tilecache%capacity = 60
     
-    tilecache%capacity = 30
-    
-    
+
     MAIN: do iCell=1, nCellsSolve
+        nEoC = nEdgesOnCell(iCell)
+        allocate(CoC(nEoC))
+        CoC(:) = cellsOnCell(1:nEoC, iCell)
+        call system_clock(t2)
         lat_min = latVertex(verticesOnCell(1, iCell))
         lat_max = latVertex(verticesOnCell(1, iCell))
         lon_max = lonVertex(verticesOnCell(1, iCell))
         lon_min = lonVertex(verticesOnCell(1, iCell))
+        ! Find the bounding box lat/lon
         EXPAND: do j=2, nEdgesOnCell(iCell)
             l = verticesOnCell(j, iCell)
             if (latVertex(l) > lat_max) then
@@ -98,18 +424,19 @@
                 lon_min = lonVertex(l)
             end if
         end do EXPAND
-        if ((lon_max - lon_min .gt. PI) .and. ((lonCell(iCell) - lon_max .lt. PI/6.0) .or. (lon_min - lonCell(iCell) .lt. PI/6.0))) then
-            write(0,*) "EXPAND AGAIN"
+        ! Check to see if the cell crosses the date line. If so, shift the
+        ! western half to the east and re-make the bounding box lat lon
+        if ((lon_max - lon_min .gt. PI) .and. ((abs(lonCell(iCell) - lon_max) .lt. PI/6.0) .or. (abs(lon_min - lonCell(iCell)) .lt. PI/6.0))) then
             lon_max = lonVertex(verticesOnCell(1, iCell))
             lon_min = lonVertex(verticesOnCell(1, iCell))
-            if (lon_min < 0) then
+            if (lon_min < PI) then
                 lon_min = lon_min + 2*PI
                 lon_max = lon_max + 2*PI
             end if
             EXPANDAGAIN: do j=2, nEdgesOnCell(iCell)
                 l = verticesOnCell(j, iCell)
                 lon_pt = lonVertex(l)
-                if (lon_pt < 0) then 
+                if (lon_pt < PI) then 
                     lon_pt = lon_pt + 2*PI
                 end if
                 if (lon_pt > lon_max) then
@@ -119,8 +446,6 @@
                 end if
             end do EXPANDAGAIN
         end if
-        write (0,*) "lon min, max", lon_min, ",", lon_max, iCell
-        write (0,*) "lat min, max", lat_min, ",", lat_max, iCell
         lat_min = lat_min * 180.0 / PI
         lat_max = lat_max * 180.0 / PI
         lon_min = lon_min * 180.0 / PI
@@ -129,98 +454,328 @@
         iCheckEnd = ceiling((lon_max + 180.0) / tdim)
         jCheckStart = floor((lat_min + 90.0) / tdim)
         jCheckEnd = ceiling((lat_max + 90.0) / tdim)
-        nti = ceiling(lon_max / tile_w) - floor(lon_min / tile_w)
-        ntj = ceiling(lat_max / tile_h) - floor(lat_min / tile_h)
+        ! These are the i, j bounding values in the space of the geographical
+        ! dataset. I expand the bounding box by an arbitrary amount on all sides
+        ! to avoid cutting off any necessary data. This amount may need
+        ! calibrated.
+        iCheckStart = max(iCheckStart - 30, 1)
+        jCheckStart = max(jCheckStart - 30, 1)
+        iCheckEnd = iCheckEnd + 30
+        jCheckEnd = min(jCheckEnd + 30, 21600)
+
+        ! At the poles, artificially extend the j part of the bounding box as
+        ! high/low as the pole.
+        polecap=.false.
+        if (isClosest(PI/2, 1.0, latCell, lonCell, nEoC, CoC, iCell)) then
+            lat_max = 180.0
+            jCheckEnd = 21600
+            polecap=.true.
+            write (0,*) "North Pole"
+        end if
+        if (isClosest(PI/(-2), 1.0, latCell, lonCell, nEoC, CoC, iCell)) then
+            jCheckStart = 1
+            lat_min = -180.0
+            polecap = .true.
+            write (0,*) "South Pole"
+        end if
+        if (polecap) then
+            iCheckstart=1
+            iCheckEnd=43200
+        end if
+
+        ! This just makes finding nti, ntj simpler
+        if (mod(iCheckStart, nx) == 0) iCheckStart = iCheckStart - 1 
+        if (mod(jCheckStart, ny) == 0) jCheckStart = jCheckStart - 1
+
+        nti = (iCheckEnd - 1) / nx - iCheckStart / nx + 1
+        ntj = (jCheckEnd - 1) / ny - jCheckStart / ny + 1
         iTileStart = iCheckStart - mod(iCheckStart, nx) + 1 
         jTileStart = jCheckStart - mod(jCheckStart, ny) + 1 
-        allocate(rarray(iTileStart - nh:iTileStart+nx*nti+nh-1, jTileStart-nh:jTileStart+ny*ntj+nh-1, nz))
-        !allocate(temparray(nx+2*nh,ny+2*nh,1))
+        lat_cell = latCell(iCell)
+        lon_cell = lonCell(iCell)
 
-        stride = 1
-!        if (nti > 7) then
-!            write(0,*) "BIG"
-!            stride = nti 
-!        end if
-
-
-!        write(0,*) "iCheckStart, End: ", iCheckStart, ",", iCheckEnd
-!        write(0,*) "jCheckStart, End: ", jCheckStart, ",", jCheckEnd
-!        write (0,*) "nti, ntj: ", nti, ",", ntj
-!        write (0,*) "lon min, max", lon_min, ",", lon_max
-!        write (0,*) "lat min, max", lat_min, ",", lat_max
-!        write (0,*) "rarray allocated dimensions: ", iTileStart - nh, ":", iTileStart+nx*nti+nh-1, ", ", jTileStart-nh, ":", jTileStart+ny*ntj+nh-1
-!        write (0,*) "Shape of rarray: ", shape(rarray)
-
-
-        ITILE: do i=1, nti
-        jTileStart = jCheckStart - mod(jCheckStart, ny) + 1 
-        JTILE: do j=1, ntj
-            keyptr => tile_key(iTileStart, jTileStart, nx, ny)
-            if (tilecache%hit(keyptr)) then
-                tptr => tilecache%get(keyptr)
-                select type (tptr)
-                type is (tile_key)
-                    temparray => tptr%getData()
-                class default
-                    print *, "error, wrong key type"
-                end select
-            else
-                iTileEnd = iTileStart + nx - 1
-                jTileEnd = jTileStart + ny - 1
-                !write(0,*) "foo, latmax = ", lat_max, " latmin = ", lat_min, " lonmax = ", lon_max, "lon_min = ", lon_min
-                !write(0,*) "iTileStart, end: ", iTileStart, iTileEnd, " jTileStart, end: ", jTileStart, jTileEnd
-                !write(0,*) iTileStart - nh, ":", iTileEnd + nh, jTileStart - nh, ":", jTileEnd + nh
-
-                write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-                     trim(geog_sub_path),mod(iTileStart,43200),'-',mod(iTileEnd-1,43200)+1 ,'.',jTileStart,'-',jTileEnd
-                write(0,*) trim(fname)
-                
-                u=nx+2*nh
-                l=ny+2*nh
-                !call fake_fill(temparray, jTileStart - 3)
-                call read_geogrid(fname, len_trim(fname), temparray, u, l, nz, isigned, endian, scalefactor, wordsize, istatus)
-                call init_atm_check_read_error(istatus, fname)
-                !write(0,*) "Read success, max(temparray) = ", maxval(temparray),", min: ", minval(temparray), "temparray(10,10,1)", temparray(10,10,1)
-                tptr => tile_key(iTileStart, jTileStart, nx, ny, temparray)
-                call tilecache%lru_insert(tptr)
-                deallocate(tptr)
-            end if
-            deallocate(keyptr)
-            if(associated(temparray)) then
-                rarray(iTileStart - nh:iTileEnd+nh, jTileStart - nh:jTileEnd + nh, :) = temparray
-            else
-                print *, "error, temparray not associated"
-            end if
-            jTileStart = jTileStart + ny
-
-        end do JTILE
-        iTileStart = iTileStart + nx
-        end do ITILE
-
-
-        deallocate(temparray)
-
-
+        lat_min = lat_min * PI / 180.0
+        lat_max = lat_max * PI / 180.0
+        lon_min = lon_min * PI / 180.0
+        lon_max = lon_max * PI / 180.0
         num(:) = 0
-        ICHECK: do i=iCheckStart, iCheckEnd, stride
-        JCHECK: do j=jCheckStart, jCheckEnd
-            lat_pt = -89.99583 + j * tdim
-            lon_pt = -179.99583 + i * tdim
-            lat_pt = lat_pt * PI / 180.0
+
+        select case (solve_method)
+    
+        case (1)
+
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        !       SOLVE METHOD 1      !
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        
+        ! This method first creates a mask over rarray (the bounding box) then
+        ! uses that to put the data into the field(iCell). There are 3 ways to
+        ! make this mask. 
+
+        allocate(rarray(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz))
+        allocate(mask_arr(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz))
+        allocate(int_arr(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz), source=0)
+        mask_arr(:,:,:) = .true.
+        rarray(:,:,:) = 0.0
+
+        ! Gather rarray, the geographical data within the bounding box.
+
+        call system_clock(t4)
+        ICHECK: do it=1,nti
+        jTileStart = jCheckStart - mod(jCheckStart, ny) + 1
+        JCHECK: do jt=1,ntj
+            !iTileStart = mod(iTileStart, 43200)
+            !jTileStart = mod(jTileStart, 21600)
+            temparray => get_tile(mod(iTileStart, 43200), mod(jTileStart, 21600), tilecache, nx, ny, nz, nh, geog_data_path, geog_sub_path, isigned, endian, scalefactor, wordsize)
+            iTileEnd = iTileStart + nx - 1
+            jTileEnd = jTileStart + ny - 1
+            x = max(iCheckStart, iTileStart)
+            x2 = min(iCheckEnd, iTileEnd)
+            y = max(jCheckStart, jTileStart)
+            y2 = min(jCheckEnd, jTileEnd)
+
+            rarray(x:x2, y:y2, :) = temparray(x - iTileStart + 1 + nh:x2 - iTileStart + 1 + nh,y - jTileStart + 1 + nh:y2 - jTileStart + 1 + nh,:) 
+            jTileStart = jTileStart+ny
+        end do JCHECK
+        iTileStart = iTileStart + nx
+        end do ICHECK
+
+        
+
+        call system_clock(t3)
+!        write(0,*) "Time to gather rarray", real(t3-t4) / real(cntrate)
+
+        call system_clock(t5)
+
+        select case (mask_method)
+
+
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        !       MASK METHOD A       !
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        
+        ! This is a recursive method. It divides the mask into quadrants. If all
+        ! 4 corners of the quadrant are within iCell, the whole quadrant is kept
+        ! as .true. At the teminating quadrant, each point is checked
+        ! individually. Fastest but least correct method (up to 25m max error on
+        ! very coarse meshes).
+        case ('A')
+
+        call system_clock(t3)
+        call div_and_conq(mask_arr, iCheckStart, iCheckEnd, jCheckStart, jCheckEnd, iCheckStart-1, jCheckStart-1, nEoC, CoC, latCell, lonCell, iCell)
+        call system_clock(t4)
+!        write(0,*) "Time D+C: ", real(t4-t3) / real(cntrate)
+
+
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        !       MASK METHOD B       !
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        ! This is an array-based method. Instead of checking each point
+        ! individually, perform array operations and compare the distance
+        ! from iCell to each neighbor to create the mask. Slower than A.
+
+        case ('B')
+
+        allocate(lat_arr(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz))
+        allocate(lon_arr(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz))
+        allocate(dist2_icell_arr(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz))
+        allocate(dist2_ocell_arr(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz))
+        call con_lx(lat_cell, lon_cell, r, x_cell, y_cell, z_cell)
+
+        do i=iCheckStart,iCheckEnd
+            lon_pt = -179.99583 + (i-1) * tdim
             lon_pt = lon_pt * PI / 180.0
-            lat_min = lat_min * PI / 180.0
-            lat_max = lat_max * PI / 180.0
-            lon_min = lon_min * PI / 180.0
-            lon_max = lon_max * PI / 180.0
-            closest = .true.
-            DIST: do l=1, nEdgesOnCell(iCell)
-                if (sphere_distance(lat_pt, lon_pt, latCell(cellsOnCell(l, iCell)), lonCell(cellsOnCell(l, iCell)), 1.0) &
-                    < sphere_distance(lat_pt, lon_pt, latCell(iCell), lonCell(iCell), 1.0)) then
-                    closest = .false.
-                end if
-            end do DIST
+
+            lon_arr(i,:,:) = lon_pt
+        end do
+        
+        do j=jCheckStart,jCheckEnd
+            lat_pt = -89.99583 + (j-1) * tdim
+            lat_pt = lat_pt * PI / 180.0         
             
-            if (closest) then
+            lat_arr(:,j,:) = lat_pt
+        end do
+
+        call arrDist2(lat_arr, lon_arr, r, x_cell, y_cell, z_cell, dist2_icell_arr)
+
+        do l=1,nEdgesOnCell(iCell)
+            call con_lx(latCell(cellsOnCell(l,iCell)), lonCell(cellsOnCell(l,iCell)), r, x_cell, y_cell, z_cell)
+            call arrDist2(lat_arr, lon_arr, r, x_cell, y_cell, z_cell, dist2_ocell_arr)
+            where(dist2_ocell_arr < dist2_icell_arr) mask_arr = .false.
+        end do
+
+        deallocate(lat_arr, lon_arr, dist2_icell_arr, dist2_ocell_arr) 
+
+
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        !       MASK METHOD C       !
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        ! Point by point, determine if it is owned by iCell and if not, set to
+        ! false. Slower than B.        
+        case ('C')
+
+        do j=jCheckStart, jCheckEnd
+        lat_pt = -89.99583 + (j-1) * tdim
+        lat_pt = lat_pt * PI / 180.0
+        do i=iCheckStart, iCheckEnd
+            lon_pt = -179.99583 + (i-1) * tdim
+            lon_pt = lon_pt * PI / 180.0
+
+            dist = sphere_distance(lat_pt, lon_pt, lat_cell, lon_cell, 1.0)
+            closest = .true.
+            DISTC: do l=1, nEdgesOnCell(iCell)
+                if (sphere_distance(lat_pt, lon_pt, latCell(cellsOnCell(l, iCell)), lonCell(cellsOnCell(l, iCell)), 1.0) &
+                    < dist) then
+                    closest = .false.
+                    exit
+                end if
+            end do DISTC
+            
+            if (.not. closest) mask_arr(i,j,:) = .false.
+        end do
+        end do
+
+        case default
+        end select
+
+        !MASK MADE
+
+
+        call system_clock(t3)
+
+        do j=jCheckStart, jCheckEnd
+        do i=iCheckStart, iCheckEnd
+            if (mask_arr(i,j,1) .and. ncats == 1) then
+                field(iCell) = field(iCell) + rarray(i,j,1)
+                num(1) = num(1) + 1
+            else if (mask_arr(i,j,1) .and. ncats > 1) then
+                num(int(rarray(i,j,1))) = num(int(rarray(i,j,1))) + 1
+            end if
+        end do
+        end do
+
+! Alternate version of above, produces error at the south pole for some reason.
+
+!        if (ncats == 1) then
+!            field(iCell) = sum(rarray(:,:,1), MASK=mask_arr(:,:,1))
+!            where(mask_arr(:,:,1)) 
+!                int_arr(:,:,1) = 1
+!            elsewhere
+!                int_arr(:,:,1) = 0
+!            end where
+!            num(1) = sum(int_arr(:,:,1))        
+!        else
+!            do l=0,ncats
+!                where(mask_arr(:,:,1) .and. int(rarray(:,:,1)) == l) 
+!                    int_arr(:,:,1) = 1
+!                elsewhere
+!                    int_arr(:,:,1) = 0
+!                end where
+!                num(l) = sum(int_arr(:,:,1))
+!            end do
+!        end if
+    
+
+        call system_clock(t6)
+        write(0,*) "Time to make mask iCell ", iCell, ": ", real(t3-t5) / real(cntrate)
+
+        
+        deallocate(rarray, mask_arr, int_arr, CoC)
+
+
+
+
+
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        !       SOLVE METHOD 2      !
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        ! For each tile, get it using get_tile and process the relevant points
+
+        case (2)
+
+        call system_clock(t5)
+        lat_cell = latCell(iCell)
+        lon_cell = lonCell(iCell)
+        ITCHECK: do it=1,nti
+        j = jCheckStart
+        jTileStart = jCheckStart - mod(jCheckStart, ny) + 1 
+        JTCHECK: do jt=1,ntj
+            temparray => get_tile(mod(iTileStart, 43200), mod(jTileStart, 21600), tilecache, nx, ny, nz, nh, geog_data_path, geog_sub_path, isigned, endian, scalefactor, wordsize)
+            iTileEnd = iTileStart + nx - 1
+            jTileEnd = jTileStart + ny - 1
+            i = max(iCheckStart, iTileStart)
+            tempint = i
+            do while (j <= jCheckEnd .and. j <= jTileEnd)
+            lat_pt = -89.99583 + (j-1) * tdim
+            lat_pt = lat_pt * PI / 180.0
+            do while (i <= iCheckEnd .and. i <= iTileEnd)
+                u = u+1
+                lon_pt = -179.99583 + (i-1) * tdim
+                lon_pt = lon_pt * PI / 180.0
+                closest = isClosest(lat_pt, lon_pt, latCell, lonCell, nEdgesOnCell(iCell), cellsOnCell(:,iCell), iCell)
+                x = i - iTileStart + nh + 1
+                y = j - jTileStart + nh + 1
+                if (closest) then
+                    if (ncats == 1) then
+                        field(iCell) = field(iCell) + temparray(x,y,1)
+                        num(1) = num(1) + 1
+                    else 
+                        num(int(temparray(x,y,1))) = num(int(temparray(x,y,1))) + 1
+                    end if
+                end if
+                i = i+1
+            end do
+            j = j+1 
+            i = tempint
+            end do 
+            jTileStart = jTileStart + ny
+        end do JTCHECK
+            iTileStart = iTileStart + nx
+        end do ITCHECK
+
+        deallocate(CoC)
+
+
+
+
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        !       SOLVE METHOD 3      !
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        ! Same as Method 2, only copy all relevant points into rarray first then
+        ! go over all of rarray and process the points. Not sure yet if faster
+        ! or slower.
+        case (3)
+       
+        allocate(rarray(iCheckStart:iCheckEnd, jCheckStart:jCheckEnd, nz))
+
+        I3CHECK: do it=1,nti
+        jTileStart = jCheckStart - mod(jCheckStart, ny) + 1
+        J3CHECK: do jt=1,ntj
+            temparray => get_tile(mod(iTileStart, 43200), mod(jTileStart, 21600), tilecache, nx, ny, nz, nh, geog_data_path, geog_sub_path, isigned, endian, scalefactor, wordsize)
+            iTileEnd = iTileStart + nx - 1
+            jTileEnd = jTileStart + ny - 1
+            x = max(iCheckStart, iTileStart)
+            x2 = min(iCheckEnd, iTileEnd)
+            y = max(jCheckStart, jTileStart)
+            y2 = min(jCheckEnd, jTileEnd)
+
+            rarray(x:x2, y:y2, :) = temparray(x - iTileStart + 1 + nh:x2 - iTileStart + 1 + nh,y - jTileStart + 1 + nh:y2 - jTileStart + 1 + nh,:) 
+            jTileStart = jTileStart+ny
+        end do J3CHECK
+        iTileStart = iTileStart + nx
+        end do I3CHECK
+
+        do j=jCheckStart, jCheckEnd
+        lat_pt = -89.99583 + (j-1) * tdim
+        lat_pt = lat_pt * PI / 180.0
+        do i=iCheckStart, iCheckEnd
+            lon_pt = -179.99583 + (i-1) * tdim
+            lon_pt = lon_pt * PI / 180.0
+            if (isClosest(lat_pt, lon_pt, latCell, lonCell, nEdgesOnCell(iCell), cellsOnCell(:,iCell), iCell)) then
                 if (ncats == 1) then
                     field(iCell) = field(iCell) + rarray(i,j,1)
                     num(1) = num(1) + 1
@@ -228,20 +783,23 @@
                     num(int(rarray(i,j,1))) = num(int(rarray(i,j,1))) + 1
                 end if
             end if
-        end do JCHECK
-        end do ICHECK
+        end do 
+        end do 
+
+        deallocate(CoC, rarray)
+        case default
+        end select
 
 
-        deallocate(rarray)    
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        !            END SOLVE METHODS               !
+        !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+        ! Put the finishing touches on the value for field(iCell)
         
         if (ncats == 1) then
             if (num(1) > 0) then
                 field(iCell) = field(iCell) / real(num(1))
-                !if (ieee_is_nan(field(iCell))) then
-                !    field(iCell) = 0.0
-                !end if
-                write(0,*) "End MAIN, iCell = ", iCell, "field = ", field(iCell), ", num = ", num(1)
             else
                 write(0,*) "End MAIN, num = 0 for iCell = ", iCell
             end if
@@ -250,15 +808,21 @@
             do i=1,ncats
                 if (num(i) > num(int(field(iCell)))) field(iCell) = i
             end do
-            write(0,*) "End MAIN, iCell = ", iCell, "field = ", field(iCell), ", num = ", num(field(iCell))
         end if
 
-
+        call system_clock(t3)
+        write (0,*) "Time for iCell ", iCell, ": ", real(t3-t2) / real(cntrate)
     end do MAIN
 
+    write (0,*) "Total time spent in tilecache methods = ", tilecache%tget + tilecache%tremove + tilecache%tinsert + tilecache%thit
+    extime = real(t3-t1) / real(cntrate)
+    write (0,*) "Total execution time for foo:", extime
+    write (0,*) "Per cell avg: ", extime / nCellsSolve
     deallocate(num)
-    !call MPI_BARRIER(MPI_COMM_WORLD, istatus)
-    !write (0,*) "Barrier exited with status ", istatus
+    do while (tilecache%size() > 0)
+        call tilecache%lru_remove()
+    end do
+    write (0,*) "Exit foo"
 
  end subroutine foo
 
@@ -269,6 +833,8 @@
 !==================================================================================================
  subroutine init_atm_static(mesh, dims, configs)
 !==================================================================================================
+
+ use mpi, only: MPI_BARRIER
 
 !inout arguments:
  type (mpas_pool_type), intent(inout) :: mesh
@@ -416,6 +982,8 @@
  areaTriangle = areaTriangle * sphere_radius**2.0
  kiteAreasOnVertex = kiteAreasOnVertex * sphere_radius**2.0
 
+ where (lonVertex < 0) lonVertex = lonVertex+2*PI
+ where (lonCell < 0) lonCell = lonCell + 2*PI
 
 !
 ! Initialize Coriolis parameter field on edges and vertices
@@ -471,13 +1039,13 @@
  scalefactor = 1.0
  geog_sub_path = 'topo_30s/'
 
- write(0,*) "Shape of ter: ", shape(ter), ", nCells = ", nCells, ", nCellsSolve = ", nCellsSolve
 
  call foo(geog_data_path, geog_sub_path, nx, ny, nz, 3, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
                 verticesOnCell, cellsOnCell, nEdgesOnCell, field, 1, isigned, endian, scalefactor, wordsize)
- write (0,*) "Foo returned successfully"
  ter(1:nCells) = field(:)
  if (associated(field)) deallocate(field)
+ call MPI_BARRIER(MPI_COMM_WORLD, istatus)
+ write(0,*) '--- end interpolate TER'
 ! isigned  = 1
 ! endian   = 0
 ! wordsize = 2
@@ -552,14 +1120,11 @@
 
  call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
                 verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
- write (0,*) "Foo returned successfully"
- write(0,*) "Shape of lu_index: ", shape(lu_index), ", nCells = ", nCells, ", nCellsSolve = ", nCellsSolve
- write (0,*) "Shape if field: ", shape(field)
  lu_index(1:nCells) = int(field(:))
  if (associated(field)) deallocate(field)
 
  where(lu_index == 0) lu_index = 1
-
+ call MPI_BARRIER(MPI_COMM_WORLD, istatus)
  !allocate(rarray(nx,ny,nz))
  !allocate(ncat(ismax_lu,nCells))
  !ncat(:,:) = 0
@@ -624,63 +1189,14 @@
  endian      = 0
  wordsize    = 1
  scalefactor = 1.0
-! allocate(rarray(nx,ny,nz))
-! allocate(ncat(16,nCells))
-! ncat(:,:) = 0
  soilcat_top(:) = 0.0
 
  geog_sub_path = 'soiltype_top_30s/'
  call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
-                verticesOnCell, cellsOnCell, nEdgesOnCell, field, 16, isigned, endian, scalefactor, wordsize)
- write (0,*) "Foo returned successfully"
+                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
  soilcat_top(1:nCells) = int(field(:))
  if (associated(field)) deallocate(field)
 
-
-
-
-!
-! do jTileStart = 1,20401,ny
-!    jTileEnd = jTileStart + ny - 1
-!
-!    do iTileStart = 1,42001,nx
-!       iTileEnd = iTileStart + nx - 1
-!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-!             'soiltype_top_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-!       write(0,*) trim(fname)
-!
-!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-!                         scalefactor,wordsize,istatus)
-!       call init_atm_check_read_error(istatus, fname)
-!
-!       iPoint = 1
-!       do j=1,ny
-!       do i=1,nx
-!          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
-!          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
-!          lat_pt = lat_pt * PI / 180.0
-!          lon_pt = lon_pt * PI / 180.0
-!
-!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-!                                nEdgesOnCell,cellsOnCell, &
-!                                latCell,lonCell)
-!          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
-!       end do
-!       end do
-!
-!    end do
-! end do
-
-! do iCell = 1,nCells
-!    soilcat_top(iCell) = 1
-!    do i = 2,16
-!       if(ncat(i,iCell) > ncat(soilcat_top(iCell),iCell)) then
-!          soilcat_top(iCell) = i
-!       end if
-!    end do
-! end do
-! deallocate(rarray)
-! deallocate(ncat)
  write(0,*) '--- end interpolate SOILCAT_TOP'
 
 
@@ -694,61 +1210,14 @@
  endian   = 0
  wordsize = 1
  scalefactor = 1.0
-! allocate(rarray(nx,ny,nz))
-! allocate(ncat(16,nCells))
-! ncat(:,:) = 0
  soilcat_bot(:) = 0.0
-
 
  geog_sub_path = 'soiltype_bot_30s/'
  call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
-                verticesOnCell, cellsOnCell, nEdgesOnCell, field, 16, isigned, endian, scalefactor, wordsize)
- write (0,*) "Foo returned successfully"
+                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
  soilcat_bot(1:nCells) = int(field(:))
  if (associated(field)) deallocate(field)
 
-
-! do jTileStart = 1,20401,ny
-!    jTileEnd = jTileStart + ny - 1
-!
-!    do iTileStart = 1,42001,nx
-!       iTileEnd = iTileStart + nx - 1
-!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-!             'soiltype_bot_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-!       write(0,*) trim(fname)
-!
-!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-!                         scalefactor,wordsize,istatus)
-!       call init_atm_check_read_error(istatus, fname)
-!
-!       iPoint = 1
-!       do j=1,ny
-!       do i=1,nx
-!          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
-!          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
-!          lat_pt = lat_pt * PI / 180.0
-!          lon_pt = lon_pt * PI / 180.0
-!
-!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-!                                nEdgesOnCell,cellsOnCell, &
-!                                latCell,lonCell)
-!          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
-!       end do
-!       end do
-!
-!    end do
-! end do
-
-! do iCell =1,nCells
-!    soilcat_bot(iCell) = 1
-!    do i = 2,16
-!       if(ncat(i,iCell) > ncat(soilcat_bot(iCell),iCell)) then
-!          soilcat_bot(iCell) = i
-!       end if
-!    end do
-! end do
-! deallocate(rarray)
-! deallocate(ncat)
  write(0,*) '--- end interpolate SOILCAT_BOT'
 
 
@@ -1076,6 +1545,8 @@ snoalb(:) = 1.0
  deallocate(vegfra)
  write(0,*) '--- end interpolate ALBEDO12M'
 
+ call MPI_BARRIER(MPI_COMM_WORLD, istatus)
+ write (0,*) "Barrier exited with status ", istatus
 
  end subroutine init_atm_static
 
@@ -1095,7 +1566,7 @@ snoalb(:) = 1.0
  character(len=StrKIND) :: fname
  character(len=StrKIND) :: dir_gwdo
  character(len=StrKIND), pointer :: config_geog_data_path
- character(len=StrKIND+1) :: geog_data_path      ! same as config_geog_data_path, but guaranteed to have a trailing slash
+ character(len=StrKIND+1) :: geog_data_path, geog_sub_path      ! same as config_geog_data_path, but guaranteed to have a trailing slash
 
  integer, pointer :: nCells, nEdges, maxEdges
 
@@ -1164,6 +1635,7 @@ snoalb(:) = 1.0
 
 !
 ! Interpolate VARSSO:
+ geog_sub_path = 'varsso'
  varsso(:) = 0.0_RKIND
  nx = 600
  ny = 600
@@ -2368,6 +2840,39 @@ snoalb(:) = 1.0
  sphere_distance = 2.*radius*asin(arg1)
 
  end function sphere_distance
+
+
+ subroutine arrDist2(lat, lon, radius, x, y, z, dist2)
+
+    real(kind=RKIND), dimension(:,:,:), intent(in) :: lat, lon
+    real(kind=RKIND), dimension(:,:,:), intent(inout) :: dist2
+    real(kind=RKIND), intent(in) :: radius, x, y, z
+
+    dist2 = (radius * sin(lat)-z)**2 
+    dist2 = dist2 + (radius * cos(lon) * cos(lat)-x)**2
+    dist2 = dist2 + (radius * sin(lon) * cos(lat)-y)**2
+ end subroutine arrDist2
+
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! SUBROUTINE CONVERT_LX
+   !
+   ! Convert (lat,lon) to an (x, y, z) location on a sphere with specified
+   ! radius.
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   subroutine con_lx(lat, lon, radius, x, y, z)
+
+      implicit none
+
+      real (kind=RKIND), intent(in) :: radius, lat, lon
+      real (kind=RKIND), intent(out) :: x, y, z
+
+      z = radius * sin(lat)
+      x = radius * cos(lon) * cos(lat)
+      y = radius * sin(lon) * cos(lat)
+   end subroutine con_lx
+
+    
+
 
 !==================================================================================================
  end module mpas_init_atm_static

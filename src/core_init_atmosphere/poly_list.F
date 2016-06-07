@@ -4,6 +4,7 @@ module key_mod
     contains
       procedure :: setID
       procedure :: getID
+      procedure :: deletekey
       procedure(eq), deferred :: equals
       generic :: operator(==) => equals
   end type key
@@ -18,6 +19,10 @@ module key_mod
   end interface
 
   contains
+
+    subroutine deletekey(this)
+        class(key) :: this
+    end subroutine deletekey
 
     subroutine setID(this, i)
         class(key) :: this
@@ -187,7 +192,8 @@ implicit none
 
     subroutine delete(this)
         class(node) :: this
-        deallocate(this%mykey)
+        !call this%mykey%deletekey()
+        if(associated(this%mykey)) deallocate(this%mykey)
         this%next => null()
         this%prev => null()
     end subroutine delete
