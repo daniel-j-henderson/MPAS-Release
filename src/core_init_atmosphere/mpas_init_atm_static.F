@@ -18,7 +18,7 @@
  use mpas_atmphys_utilities
 
  implicit none
- private :: foo, foo2, get_tile, con_lx, isClosest, div_and_conq
+ private :: foo, get_tile, con_lx, isClosest, div_and_conq
  public:: init_atm_static,           &
           init_atm_static_orogwd,    &
           init_atm_check_read_error, &
@@ -175,167 +175,11 @@
 
  end subroutine div_and_conq
 
- subroutine foo2(geog_data_path, geog_sub_path, nx, ny, nz, nh, &
-                 field, nCats, isigned, endian, scalefactor, wordsize)
-    
- integer, pointer :: nCells, nEdges, nVertices, nCellsSolve
- 
- integer, dimension(:), pointer :: nEdgesOnCell
- integer, dimension(:,:), pointer :: cellsOnCell, cellsOnVertex, verticesOnCell, edgesOnVertex
- real (kind=RKIND), dimension(:), pointer :: xCell, yCell, zCell
- real (kind=RKIND), dimension(:), pointer :: xEdge, yEdge, zEdge
- real (kind=RKIND), dimension(:), pointer :: latCell, lonCell
- real (kind=RKIND), dimension(:), pointer :: latVertex, lonVertex
- real (kind=RKIND), dimension(:), pointer :: latEdge, lonEdge
- integer, dimension(:), allocatable :: borderVertices
- type(list) ::bvertslist
- class(key), pointer :: keyptr
- 
-
- call mpas_pool_get_array(mesh, 'xCell', xCell)
- call mpas_pool_get_array(mesh, 'yCell', yCell)
- call mpas_pool_get_array(mesh, 'zCell', zCell)
- call mpas_pool_get_array(mesh, 'latCell', latCell)
- call mpas_pool_get_array(mesh, 'lonCell', lonCell)
- call mpas_pool_get_array(mesh, 'latEdge', latEdge)
- call mpas_pool_get_array(mesh, 'lonEdge', lonEdge)
- call mpas_pool_get_array(mesh, 'latVertex', latVertex)
- call mpas_pool_get_array(mesh, 'lonVertex', lonVertex)
- 
- call mpas_pool_get_array(mesh, 'nEdgesOnCell', nEdgesOnCell)
- call mpas_pool_get_array(mesh, 'cellsOnCell', cellsOnCell)
- call mpas_pool_get_array(mesh, 'cellsOnVertex', cellsOnVertex)
- call mpas_pool_get_array(mesh, 'edgesOnVertex', edgesOnVertex)
-
- call mpas_pool_get_dimension(dims, 'nCells', nCells)
- call mpas_pool_get_dimension(dims, 'nEdges', nEdges)
- call mpas_pool_get_dimension(dims, 'nVertices', nVertices)
- call mpas_pool_get_dimension(dims, 'nCellsSolve', nCellsSolve) 
-
- do i=nCellsSolve+1, nCells
- do j=1,nEdgesOnCell(i)
- do k=1,vertexDegree
-    temp = cellsOnVertex(k, verticesOnCell(j,i))
-    if(temp <= nCellsSolve) then
-        keyptr => int_key(0,temp)
-        if (.not. bvertslist%contains(keyptr)) then
-            call bvertslist%insert(keyptr)
-            lon_cell = lonCell(i)
-            lat_cell = latCell(i)
-            if (lon_cell > lon_max) then
-                lon_max = lon_cell
-            else if(lon_cell < lon_min) then
-                lon_min = lon_cell
-            end if
-
-            if (lat_cell > lat_max) then
-                lat_max = lat_cell
-            else if (lat_cell < lat_min) then   
-                lat_min = lat_cell
-            end if
-
-            exit
-        end if
-        deallocate(keyptr)
-    end if
- end do
-
- nBorderVertices = bvertslist%size()
- allocate(borderVertices(nBorderVertices))
- do i=1,nBorderVertices
-     keyptr => bvertslist%removeFirst()
-    borderVertices(i) = keyptr%getValue
-    deallocate keyptr
- end do
-
- lat_min = lat_min * 180.0 / PI
- lat_max = lat_max * 180.0 / PI
- lon_min = lon_min * 180.0 / PI
- lon_max = lon_max * 180.0 / PI
- iRegionStart = floor((lon_min + 180.0) / tdim)
- iRegionEnd = ceiling((lon_max + 180.0) / tdim)
- jRegionStart = floor((lat_min + 90.0) / tdim)
- jRegionEnd = ceiling((lat_max + 90.0) / tdim)
- ! These are the i, j bounding values in the space of the geographical
- ! dataset. I expand the bounding box by an arbitrary amount on all sides
- ! to avoid cutting off any necessary data. This amount may need
- ! calibrated.
-
-! Check to see if the pole is in the region. If so, expand region start/end to
-! the pole.
-! polecap=.false.
-! if (isClosest(PI/2, 1.0, latCell, lonCell, nEoC, CoC, iCell)) then
-!     lat_max = 180.0
-!     jCheckEnd = 21600
-!     polecap=.true.
-!     write (0,*) "North Pole"
-! end if
-! if (isClosest(PI/(-2), 1.0, latCell, lonCell, nEoC, CoC, iCell)) then
-!     jCheckStart = 1
-!     lat_min = -180.0
-!     polecap = .true.
-!     write (0,*) "South Pole"
-! end if
-! if (polecap) then
-!     iCheckstart=1
-!     iCheckEnd=43200
-! end if
-
- ! This just makes finding nti, ntj simpler
- if (mod(iCheckStart, nx) == 0) iRegionStart = iRegionStart - 1 
- if (mod(jCheckStart, ny) == 0) jRegionStart = jRegionStart - 1
-
- nti = (iRegionEnd - 1) / nx - iRegionStart / nx + 1
- ntj = (jRegionEnd - 1) / ny - jRegionStart / ny + 1
- iTileStart = iRegionStart - mod(iRegionStart, nx) + 1 
- jTileStart = jRegionStart - mod(jRegionStart, ny) + 1 
- lat_cell = latCell(iCell)
- lon_cell = lonCell(iCell)
-
- lat_min = lat_min * PI / 180.0
- lat_max = lat_max * PI / 180.0
- lon_min = lon_min * PI / 180.0
- lon_max = lon_max * PI / 180.0
-
-lon_pt = -179.99583 + (i-1) * tdim
-            lon_pt = lon_pt * PI / 180.0
-
-            lon_arr(i,:,:) = lon_pt
-        end do
-
-        do j=jCheckStart,jCheckEnd
-            lat_pt = -89.99583 + (j-1) * tdim
-            lat_pt = lat_pt * PI / 180.0
-
- do i=1,nti
- do j=1,ntj
-    c_lats(1) = -89.99583 + (jTileStart + (j-1)*ny) * tdim
-    c_lats(2) = -89.99583 + (jTileStart + j*ny - 1) * tdim
-    c_lons(1) = -179.99583 + (iTileStart + (i-1)*nx) * tdim
-    c_lons(2) = -179.99583 + (iTileStart + i*nx-1) * tdim
-    c_lats = c_lats * PI / 180.0
-    c_lons = c_lons * PI / 180.0
-    temp = nInsideCorners(c_lats, c_lons, !other stuff, needs to be able to
-                                          !determine nearest cell to each corner
-    if(temp == 4) then
-        iCheckStart = 1
-        iCheckEnd = nx
-        jCheckStart = 1
-        jCheckEnd = ny
-    else
-        lat_min = 100.0
-        lat_max = -100.0
-        lon_max = 100.0
-        lon_min = -100.0
-        do v=1,nBorderVertices
-            if(latVertex(borderVertices(v)) <= c_lats(2) .and. latVertex(borderVertices(v)) >= c_lats(1)) then
-                if(latVertex(borderVertices(v)) < lat_min) then
-                    lat_min = latVertex(borderVertices(v))
 
 
-
-
-
+!
+! When you want to interpolate a static field from a latlon grid onto an MPAS mesh, who you gonna call? foo!
+!
 
  subroutine foo(geog_data_path, geog_sub_path, nx, ny, nz, nh, nCells, nCellsSolve, nVertices, latCell, lonCell, &
                 latVertex, lonVertex, verticesOnCell, cellsOnCell, nEdgesOnCell, field, nCats, isigned, endian, scalefactor, wordsize)
@@ -526,7 +370,8 @@ lon_pt = -179.99583 + (i-1) * tdim
         JCHECK: do jt=1,ntj
             !iTileStart = mod(iTileStart, 43200)
             !jTileStart = mod(jTileStart, 21600)
-            temparray => get_tile(mod(iTileStart, 43200), mod(jTileStart, 21600), tilecache, nx, ny, nz, nh, geog_data_path, geog_sub_path, isigned, endian, scalefactor, wordsize)
+            temparray => get_tile(mod(iTileStart, 43200), mod(jTileStart, 21600), tilecache, &
+		nx, ny, nz, nh, geog_data_path, geog_sub_path, isigned, endian, scalefactor, wordsize)
             iTileEnd = iTileStart + nx - 1
             jTileEnd = jTileStart + ny - 1
             x = max(iCheckStart, iTileStart)
@@ -534,7 +379,8 @@ lon_pt = -179.99583 + (i-1) * tdim
             y = max(jCheckStart, jTileStart)
             y2 = min(jCheckEnd, jTileEnd)
 
-            rarray(x:x2, y:y2, :) = temparray(x - iTileStart + 1 + nh:x2 - iTileStart + 1 + nh,y - jTileStart + 1 + nh:y2 - jTileStart + 1 + nh,:) 
+            rarray(x:x2, y:y2, :) = temparray(x - iTileStart + 1 + nh:x2 - iTileStart + 1 + nh,&
+					      y - jTileStart + 1 + nh:y2 - jTileStart + 1 + nh,:) 
             jTileStart = jTileStart+ny
         end do JCHECK
         iTileStart = iTileStart + nx
@@ -542,8 +388,6 @@ lon_pt = -179.99583 + (i-1) * tdim
 
         
 
-        call system_clock(t3)
-!        write(0,*) "Time to gather rarray", real(t3-t4) / real(cntrate)
 
         call system_clock(t5)
 
@@ -561,10 +405,8 @@ lon_pt = -179.99583 + (i-1) * tdim
         ! very coarse meshes).
         case ('A')
 
-        call system_clock(t3)
-        call div_and_conq(mask_arr, iCheckStart, iCheckEnd, jCheckStart, jCheckEnd, iCheckStart-1, jCheckStart-1, nEoC, CoC, latCell, lonCell, iCell)
-        call system_clock(t4)
-!        write(0,*) "Time D+C: ", real(t4-t3) / real(cntrate)
+        call div_and_conq(mask_arr, iCheckStart, iCheckEnd, jCheckStart, jCheckEnd, &
+		     iCheckStart-1, jCheckStart-1, nEoC, CoC, latCell, lonCell, iCell)
 
 
         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1028,8 +870,6 @@ lon_pt = -179.99583 + (i-1) * tdim
 !
 ! Interpolate HGT
 !
-!nx = 126
-!ny = 126
  nx = 1200
  ny = 1200
  nz = 1
@@ -1046,53 +886,6 @@ lon_pt = -179.99583 + (i-1) * tdim
  if (associated(field)) deallocate(field)
  call MPI_BARRIER(MPI_COMM_WORLD, istatus)
  write(0,*) '--- end interpolate TER'
-! isigned  = 1
-! endian   = 0
-! wordsize = 2
-! scalefactor = 1.0
-! allocate(rarray(nx,ny,nz))
-! allocate(nhs(nCells))
-! nhs(:) = 0
-! ter(:) = 0.0
-!
-! do jTileStart = 1,20401,ny-6
-!    jTileEnd = jTileStart + ny - 1 - 6
-!
-!    do iTileStart=1,42001,nx-6
-!       iTileEnd = iTileStart + nx - 1 - 6
-!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-!             'topo_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-!       write(0,*) trim(fname)
-!
-!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-!                         scalefactor,wordsize,istatus)
-!       call init_atm_check_read_error(istatus, fname)
-!
-!       iPoint = 1
-!       do j=4,ny-3
-!       do i=4,nx-3
-!          lat_pt = -89.99583  + (jTileStart + j - 5) * 0.0083333333
-!          lon_pt = -179.99583 + (iTileStart + i - 5) * 0.0083333333
-!          lat_pt = lat_pt * PI / 180.0
-!          lon_pt = lon_pt * PI / 180.0
-!
-!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-!                                nEdgesOnCell,cellsOnCell, &
-!                                latCell,lonCell)
-!          ter(iPoint) = ter(iPoint) + rarray(i,j,1)
-!          nhs(iPoint) = nhs(iPoint) + 1
-!       end do
-!       end do
-!
-!    end do
-! end do
-!
-! do iCell = 1,nCells
-!    ter(iCell) = ter(iCell) / real(nhs(iCell))
-! end do
-! deallocate(rarray)
-! deallocate(nhs)
-! write(0,*) '--- end interpolate TER'
 
 
 !
@@ -1125,57 +918,6 @@ lon_pt = -179.99583 + (i-1) * tdim
 
  where(lu_index == 0) lu_index = 1
  call MPI_BARRIER(MPI_COMM_WORLD, istatus)
- !allocate(rarray(nx,ny,nz))
- !allocate(ncat(ismax_lu,nCells))
- !ncat(:,:) = 0
- !lu_index(:) = 0.0
-!
-! do jTileStart = 1,20401,ny
-!    jTileEnd = jTileStart + ny - 1
-!
-!    do iTileStart = 1,42001,nx
-!       iTileEnd = iTileStart + nx - 1
-!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-!             trim(geog_sub_path),iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-!       write(0,*) trim(fname)
-!
-!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-!                         scalefactor,wordsize,istatus)
-!       call init_atm_check_read_error(istatus, fname)
-!
-!       iPoint = 1
-!       do j=1,ny
-!       do i=1,nx
-!!
-!! The MODIS dataset appears to have zeros at the South Pole, possibly other places, too
-!!
-!if (rarray(i,j,1) == 0) cycle
-!
-!          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
-!          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
-!          lat_pt = lat_pt * PI / 180.0
-!          lon_pt = lon_pt * PI / 180.0
-!
-!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-!                                nEdgesOnCell,cellsOnCell, &
-!                                latCell,lonCell)
-!          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
-!       end do
-!       end do
-!
-!    end do
-! end do
-!
-! do iCell = 1,nCells
-!    lu_index(iCell) = 1
-!    do i = 2,ismax_lu
-!       if(ncat(i,iCell) > ncat(lu_index(iCell),iCell)) then
-!          lu_index(iCell) = i
-!       end if
-!    end do
-! end do
-! deallocate(rarray)
-! deallocate(ncat)
  write(0,*) '--- end interpolate LU_INDEX'
 
 
