@@ -1633,8 +1633,7 @@ module mpas_timekeeping
       integer, intent(out) :: n
       type (MPAS_TimeInterval_type), intent(out) :: rem
 
-      integer :: m, i, nr
-      integer (kind=8) :: t1, t2, cntrate
+      integer :: m
 
       type (MPAS_Time_type) :: target_time
       type (MPAS_Time_type) :: updated_time, mid_time
@@ -1686,21 +1685,14 @@ module mpas_timekeeping
       ! Final number of interavls is n + m
       n = n + m
 
-      call system_clock(t2)
-      write (0,*) "Section A time: ", real(t2-t1) / real(cntrate)
-
       ! Do a final linear search, just to ensure we aren't missing any divisions.
       temp = den * n
       updated_time = ref_time + temp
 
-      i=0
       do while (target_time > updated_time)
          n = n + 1
-         i=i+1
          updated_time = updated_time + den
       end do
-      call system_clock(t1)
-      write (0,*) "Section B.1 time: ", real(t1-t2) / real(cntrate), i
 
       ! Here, if updated_time is larger than target time. Need to subtract den once, and compute remainder
       if ( updated_time > target_time ) then
@@ -1711,8 +1703,6 @@ module mpas_timekeeping
          call mpas_set_timeInterval(rem, S=0)
       end if
 
-      call system_clock(t1)
-      write (0,*) "Section B time: ", real(t1-t2) / real(cntrate)
 
       return
    end subroutine mpas_interval_division_linear
@@ -1727,8 +1717,7 @@ module mpas_timekeeping
       integer, intent(out) :: n
       type (MPAS_TimeInterval_type), intent(out) :: rem
 
-      integer :: m, i, nr
-      integer (kind=8) :: t1, t2, cntrate
+      integer :: m, nr
 
       type (MPAS_Time_type) :: target_time
       type (MPAS_Time_type) :: updated_time, mid_time
@@ -1736,7 +1725,7 @@ module mpas_timekeeping
       type (MPAS_TimeInterval_type) :: temp, mid_int
       type (MPAS_TimeInterval_type) :: zero
 
-      write (0,*) "Enter Daniel method"
+      write (0,*) "Enter new method"
 
       target_time = ref_time + num
 
@@ -1781,7 +1770,8 @@ module mpas_timekeeping
       n = n + m
 
 
-      ! Do a final linear search, just to ensure we aren't missing any divisions.
+      ! If n denominators doesn't cover all of the elapsed time, call the function again with the remaining interval 
+      ! to take advantage of the O(log(n)) portion of this method/log division function.
       temp = den * n
       updated_time = ref_time + temp
 
