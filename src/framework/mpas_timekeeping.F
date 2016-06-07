@@ -1641,7 +1641,6 @@ module mpas_timekeeping
       type (MPAS_TimeInterval_type) :: temp, mid_int
       type (MPAS_TimeInterval_type) :: zero
 
-      call system_clock(t1, cntrate)
 
       target_time = ref_time + num
 
