@@ -57,17 +57,57 @@ module test_core
       ! to use the old method, use '2' for the new method.
 
       call system_clock(start_time, rate)
-      call mpas_interval_division(ref_time, num, den, n, rem, 1)
+      call mpas_interval_division(ref_time, num, den, n, rem)
       call system_clock(stop_time)
       call mpas_get_timeInterval(rem, timeString=datestring)
       write(0,*) 'elapsed interval division time: ', real((stop_time - start_time),kind=RKIND) / real(rate,kind=RKIND)
       write(0,*) "n = ", n, " rem = ", datestring
 
-      call system_clock(start_time)
-      call mpas_interval_division(ref_time, num, den, n, rem, 2)
+      call mpas_set_timeInterval(num, YY=34)
+      call mpas_set_timeInterval(den, DD=1, S=1)
+
+
+      ! For testing purposes, I've left both the old and new methods, so you can ensure that the 
+      ! results are correct and compare execution times. Omit the final argument (or use '1') 
+      ! to use the old method, use '2' for the new method.
+
+      call system_clock(start_time, rate)
+      call mpas_interval_division(ref_time, num, den, n, rem)
       call system_clock(stop_time)
       call mpas_get_timeInterval(rem, timeString=datestring)
-      write(0,*) 'New method elapsed interval division time: ', real((stop_time - start_time),kind=RKIND) / real(rate,kind=RKIND)
+      write(0,*) 'elapsed interval division time: ', real((stop_time - start_time),kind=RKIND) / real(rate,kind=RKIND)
+      write(0,*) "n = ", n, " rem = ", datestring
+
+
+      call mpas_set_timeInterval(num, YY=4)
+      call mpas_set_timeInterval(den, MM=1)
+
+
+      ! For testing purposes, I've left both the old and new methods, so you can ensure that the 
+      ! results are correct and compare execution times. Omit the final argument (or use '1') 
+      ! to use the old method, use '2' for the new method.
+
+      call system_clock(start_time, rate)
+      call mpas_interval_division(ref_time, num, den, n, rem)
+      call system_clock(stop_time)
+      call mpas_get_timeInterval(rem, timeString=datestring)
+      write(0,*) 'elapsed interval division time: ', real((stop_time - start_time),kind=RKIND) / real(rate,kind=RKIND)
+      write(0,*) "n = ", n, " rem = ", datestring
+
+
+      call mpas_set_timeInterval(num, DD=60)
+      call mpas_set_timeInterval(den, S=1)
+
+
+      ! For testing purposes, I've left both the old and new methods, so you can ensure that the 
+      ! results are correct and compare execution times. Omit the final argument (or use '1') 
+      ! to use the old method, use '2' for the new method.
+
+      call system_clock(start_time, rate)
+      call mpas_interval_division(ref_time, num, den, n, rem)
+      call system_clock(stop_time)
+      call mpas_get_timeInterval(rem, timeString=datestring)
+      write(0,*) 'elapsed interval division time: ', real((stop_time - start_time),kind=RKIND) / real(rate,kind=RKIND)
       write(0,*) "n = ", n, " rem = ", datestring
 
       iErr = 0
