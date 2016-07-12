@@ -47,7 +47,7 @@ module kd_tree_mod
 
         logical :: left_first
         real(kind=RKIND) :: temp
-        left_first = q(axs) - this%coords(axs) <= 0
+        left_first = q(axs) - this%coords(axs) <= 0.0
 
         if(left_first) then
             if(associated(this%left_child)) call this%left_child%nn_search(mod(axs,k)+1, k, id, q, dist)
@@ -106,11 +106,11 @@ module kd_tree_mod
         integer :: l, k
         integer :: i, j, c
         real(kind=RKIND) :: keyCompare
-        print *, "Enter keyCompare()"
+!        print *, "Enter keyCompare()"
         do i=l, k+l-1
             c = merge(i-k, i, i>k)
-            if (sum(a) == 0.0) print *, "ERROR: origin point as a"
-            if (sum(b) == 0.0) print *, "ERROR: origin point as b"
+!            if (sum(a) == 0.0) print *, "ERROR: origin point as a"
+!            if (sum(b) == 0.0) print *, "ERROR: origin point as b"
             keyCompare = a(c) - b(c)
 !            print *, "in dim=", c, ",", a, "-", b, "=", keyCompare
             if(keyCompare .ne. 0.0) return
@@ -128,7 +128,7 @@ module kd_tree_mod
         integer :: i, j, m, n, med
         integer, dimension(:), allocatable :: temp
         
-        print *, "Enter mergeSort()"
+!        print *, "Enter mergeSort()"
 
         if(high > low) then
 
@@ -142,12 +142,14 @@ module kd_tree_mod
         temp(:) = ref(low:high)
         i = low
         j = med+1
-        print *, low, high, n, med
+!        print *, low, high, n, med
         do m=low, high
 !            print *, "i=", i, "j=", j
-            if (keyCompare(points(:,temp(i)), points(:,temp(j)), l, k) < 0 .and. i <= med .or. j>high) then
-                ref(m) = temp(i)
-                i = i+1
+            if (j <= high) then
+                if (keyCompare(points(:,temp(i)), points(:,temp(j)), l, k) < 0 .and. i <= med) then
+                    ref(m) = temp(i)
+                    i = i+1
+                end if
             else
                 ref(m) = temp(j)
                 j = j+1
@@ -155,7 +157,7 @@ module kd_tree_mod
         end do
         deallocate(temp)
         end if
-        print *, "Exit mergeSort()"
+!        print *, "Exit mergeSort()"
         
     end subroutine mergeSort
 
@@ -167,7 +169,7 @@ module kd_tree_mod
         integer, dimension(:), intent(inout) :: refout
         integer :: low, high, n, l, k, med, i, j, m, d, c
         
-        print*, "Enter partition(), n=", n
+!        print*, "Enter partition(), n=", n
         med = (n + 1) / 2
         refout(low+med-1) = ref(med,l)
 !        if (refout(low+med-1) == 0) print *, "Error: put a 0 in refout at ", low+med-1
@@ -209,9 +211,9 @@ module kd_tree_mod
         call partition(points, parts(med+1:n, :), refout, low+med, high, n-med, mod(l, k)+1, k)
 
 !        print *, "alloc:", allocated(parts), "med=", med, "n=", n, "k=", k
-        print *, parts
+!        print *, parts
         !if(allocated(parts)) deallocate(parts)
-        print *, "Exit partition(), n=", n
+!        print *, "Exit partition(), n=", n
     end subroutine partition
 
     subroutine sort(points, ids, n, k)
@@ -221,12 +223,12 @@ module kd_tree_mod
         integer, dimension(:), intent(inout) :: ids
         integer :: k, i, n, j
         
-        print *, "Enter sort()"
+!        print *, "Enter sort()"
         allocate(temp(k, n))
         allocate(ref(n, k+1))
         do i=1,k
             ref(:, i) = (/(j, j=1, n)/)
-            if (i == 1) print *, ref(:,i)
+            !if (i == 1) print *, ref(:,i)
             call mergeSort(points, ref(:,i), 1, n, i, k)
         end do
         call partition(points, ref(:,1:k), ref(:,k+1), 1, n, n, 1, k)
@@ -235,7 +237,7 @@ module kd_tree_mod
             points(:,i) = temp(:,ref(i,k+1))
         end do
         ids = ref(:,k+1)
-        print *, "Exit sort()"
+!        print *, "Exit sort()"
     end subroutine sort
         
 
@@ -247,16 +249,16 @@ module kd_tree_mod
         integer :: n, k, i
         integer, dimension(2) :: dims
 
-        allocate(sortpoints, source=points)
         dims = shape(points)
         k = dims(1)
         n = dims(2)
+        allocate(sortpoints(k, n), source=points)
         allocate(ids(n))
         call sort(sortpoints, ids, n, k)            
-        print *, "Sorted Points:" 
-        do i=1, n
-            print *, sortpoints(1,i), sortpoints(2,i), sortpoints(3,i)
-        end do
+!        print *, "Sorted Points:" 
+!        do i=1, n
+!            print *, ids(i), sortpoints(1,i), sortpoints(2,i), sortpoints(3,i)
+!        end do
     
         this%root => build_tree(sortpoints, ids, n, k)
     end subroutine create_tree
@@ -289,7 +291,7 @@ module kd_tree_mod
         class(tree_node) :: this
         if (associated(this%left_child)) call this%left_child%print_node()
         print *, new_line('A'), this%id, this%coords, new_line('A')
-        if (associated(this%right_child)) call this%right_child%print_node
+        if (associated(this%right_child)) call this%right_child%print_node()
     end subroutine print_node
 
 end module kd_tree_mod
