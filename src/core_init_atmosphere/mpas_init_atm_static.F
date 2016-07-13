@@ -175,11 +175,20 @@
 
  end subroutine div_and_conq
 
- subroutine foo2(geog_data_path, geog_sub_path, nx, ny, nz, nh, &
-                 field, nCats, isigned, endian, scalefactor, wordsize)
+ subroutine foo2(mesh, dims, configs, geog_data_path, geog_sub_path, nx, ny, nz, nh, &
+                 field, ncats, isigned, endian, scalefactor, wordsize)
     
- integer, pointer :: nCells, nEdges, nVertices, nCellsSolve
+ use intkey_mod
+ use list_mod
+ use kd_tree_mod
+ type (mpas_pool_type), intent(inout) :: mesh
+ type (mpas_pool_type), intent(in) :: dims
+ type (mpas_pool_type), intent(in) :: configs
+ integer, pointer :: nCells, nEdges, nVertices, nCellsSolve, vertexDegree
  
+ character(len=StrKIND+1), intent(in) :: geog_data_path, geog_sub_path
+ character(len=StrKIND) :: fname
+ integer, intent(in) :: endian,isigned,wordsize
  integer, dimension(:), pointer :: nEdgesOnCell
  integer, dimension(:,:), pointer :: cellsOnCell, cellsOnVertex, verticesOnCell, edgesOnVertex
  real (kind=RKIND), dimension(:), pointer :: xCell, yCell, zCell
@@ -187,9 +196,23 @@
  real (kind=RKIND), dimension(:), pointer :: latCell, lonCell
  real (kind=RKIND), dimension(:), pointer :: latVertex, lonVertex
  real (kind=RKIND), dimension(:), pointer :: latEdge, lonEdge
+ real (kind=RKIND), pointer :: radius
+ real(kind=4), intent(in) :: scalefactor
  integer, dimension(:), allocatable :: borderVertices
  type(list) ::bvertslist
  class(key), pointer :: keyptr
+ type(kd_tree) :: cell_tree
+ real(kind=RKIND), dimension(:,:), allocatable :: points
+ real (kind=RKIND), dimension(:), pointer, intent(out) :: field
+ real(kind=4), dimension(:,:,:), allocatable :: rarray
+ integer, dimension(:,:), allocatable :: num
+ integer :: nBorderVertices, temp
+ real(kind=RKIND), dimension(2) :: c_lats, c_lons
+ real(kind=RKIND), dimension(3) :: pt 
+
+ integer :: i, j, k, v, l, it, jt, nx, ny, nz, nh, nti, ntj, jts, ncats, istatus, iCheckStart, iCheckEnd, jCheckStart, jCheckEnd, &
+            iTileStart, iTileEnd, jTileStart, jTileEnd, iRegionStart, iRegionEnd, jRegionStart, jRegionEnd 
+ real(kind=RKIND) :: lat_pt, lon_pt, lat_min, lon_min, lat_max, lon_max, lat_cell, lon_cell, tdim=.00833333
  
 
  call mpas_pool_get_array(mesh, 'xCell', xCell)
@@ -206,11 +229,25 @@
  call mpas_pool_get_array(mesh, 'cellsOnCell', cellsOnCell)
  call mpas_pool_get_array(mesh, 'cellsOnVertex', cellsOnVertex)
  call mpas_pool_get_array(mesh, 'edgesOnVertex', edgesOnVertex)
+ call mpas_pool_get_config(mesh, 'sphere_radius', radius)
 
  call mpas_pool_get_dimension(dims, 'nCells', nCells)
  call mpas_pool_get_dimension(dims, 'nEdges', nEdges)
  call mpas_pool_get_dimension(dims, 'nVertices', nVertices)
+ call mpas_pool_get_dimension(dims, 'vertexDegere', vertexDegree)
  call mpas_pool_get_dimension(dims, 'nCellsSolve', nCellsSolve) 
+
+ write(0,*) "Begin foo2(). nCells=", nCells, ", nCellsSolve=", nCellsSolve
+
+ allocate(points(3,nCells))
+ allocate(field(nCells))
+ allocate(num(0:ncats, nCells))
+ allocate(rarray(nx+2*nh, ny+2*nh, nz))
+ do i=1, nCells-1
+    points(:,i) = (/xCell(i), yCell(i), zCell(i)/)
+ end do
+ call cell_tree%create_tree(points)
+ write (0,*) "Created Tree of Cells"
 
  do i=nCellsSolve+1, nCells
  do j=1,nEdgesOnCell(i)
@@ -239,14 +276,21 @@
         deallocate(keyptr)
     end if
  end do
+ end do
+ end do
 
  nBorderVertices = bvertslist%size()
  allocate(borderVertices(nBorderVertices))
  do i=1,nBorderVertices
      keyptr => bvertslist%removeFirst()
-    borderVertices(i) = keyptr%getValue
-    deallocate keyptr
+    select type(keyptr)
+    type is (int_key)
+    borderVertices(i) = keyptr%getValue()
+    class default
+    end select 
+    deallocate (keyptr)
  end do
+ write (0,*) "Gathered ", nBorderVertices, " border vertices"
 
  lat_min = lat_min * 180.0 / PI
  lat_max = lat_max * 180.0 / PI
@@ -289,53 +333,127 @@
  ntj = (jRegionEnd - 1) / ny - jRegionStart / ny + 1
  iTileStart = iRegionStart - mod(iRegionStart, nx) + 1 
  jTileStart = jRegionStart - mod(jRegionStart, ny) + 1 
- lat_cell = latCell(iCell)
- lon_cell = lonCell(iCell)
 
  lat_min = lat_min * PI / 180.0
  lat_max = lat_max * PI / 180.0
+
  lon_min = lon_min * PI / 180.0
  lon_max = lon_max * PI / 180.0
 
-lon_pt = -179.99583 + (i-1) * tdim
-            lon_pt = lon_pt * PI / 180.0
+ write (0,*) "lat min, max:", lat_min, lat_max
+ write (0,*) "lon min, max:", lon_min, lon_max
+ write (0,*) "number of tiles to check:", nti*ntj
+ write (0,*) "iRegionStart, End:", iRegionStart, iRegionEnd
+ write (0,*) "jRegionStart, End:", jRegionStart, jRegionEnd
 
-            lon_arr(i,:,:) = lon_pt
-        end do
+ jts = jTileStart
 
-        do j=jCheckStart,jCheckEnd
-            lat_pt = -89.99583 + (j-1) * tdim
-            lat_pt = lat_pt * PI / 180.0
-
- do i=1,nti
- do j=1,ntj
-    c_lats(1) = -89.99583 + (jTileStart + (j-1)*ny) * tdim
-    c_lats(2) = -89.99583 + (jTileStart + j*ny - 1) * tdim
-    c_lons(1) = -179.99583 + (iTileStart + (i-1)*nx) * tdim
-    c_lons(2) = -179.99583 + (iTileStart + i*nx-1) * tdim
+ do it=1,nti
+ jTileStart = jts
+ do jt=1,ntj
+    c_lats(1) = -89.99583 + (jTileStart + (jt-1)*ny) * tdim
+    c_lats(2) = -89.99583 + (jTileStart + jt*ny - 1) * tdim
+    c_lons(1) = -179.99583 + (iTileStart + (it-1)*nx) * tdim
+    c_lons(2) = -179.99583 + (iTileStart + it*nx-1) * tdim
     c_lats = c_lats * PI / 180.0
     c_lons = c_lons * PI / 180.0
-    temp = nInsideCorners(c_lats, c_lons, !other stuff, needs to be able to
+    temp = nInsideCorners(c_lats, c_lons, radius, nCellsSolve, cell_tree) !other stuff, needs to be able to
                                           !determine nearest cell to each corner
     if(temp == 4) then
         iCheckStart = 1
         iCheckEnd = nx
         jCheckStart = 1
         jCheckEnd = ny
-    else
+    else if(temp == 0) then
         lat_min = 100.0
         lat_max = -100.0
         lon_max = 100.0
         lon_min = -100.0
         do v=1,nBorderVertices
-            if(latVertex(borderVertices(v)) <= c_lats(2) .and. latVertex(borderVertices(v)) >= c_lats(1)) then
-                if(latVertex(borderVertices(v)) < lat_min) then
-                    lat_min = latVertex(borderVertices(v))
+            if(latVertex(borderVertices(v)) <= c_lats(2) .and. latVertex(borderVertices(v)) >= c_lats(1) .and.&
+               lonVertex(borderVertices(v)) <= c_lons(2) .and. lonVertex(borderVertices(v)) >= c_lons(1)) then
+                
+                iCheckStart = 1
+                iCheckEnd = nx
+                jCheckStart = 1
+                jCheckEnd = ny
+                exit
+            end if
+        end do
+    else
+        cycle
+    end if
 
+    write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+                 trim(geog_sub_path),mod(iTileStart,43200),'-',mod(iTileStart+nx-1-1,43200)+1,'.',jTileStart,'-',jTileStart+ny-1
+    write(0,*) trim(fname)
+    call read_geogrid(fname, len_trim(fname), rarray, nx+2*nh, ny+2*nh, nz, isigned, endian, scalefactor, wordsize, istatus)
+    call init_atm_check_read_error(istatus, fname)
+    
+    do j=jCheckStart, jCheckEnd
+    do i=iCheckStart, iCheckEnd
+        lat_pt = -89.99583 + (jTileStart + j - 1) * tdim
+        lon_pt = -179.99583 + (iTileStart + i - 1) * tdim
+        lat_pt = lat_pt * PI / 180.0
+        lon_pt = lon_pt * PI / 180.0
+        call con_lx(lat_pt, lon_pt, radius, pt(1), pt(2), pt(3)) 
+        l = cell_tree%nearest_cell(pt)
+        if (l <= nCellsSolve) then
+            if (ncats == 1) then
+                field(l) = field(l) + rarray(i, j, 1)
+                num(1, l) = num(1, l) + 1
+            else
+                num(rarray(i, j, 1), l) = num(rarray(i, j, 1), l) + 1
+            end if
+        end if
+    end do
+    end do
 
+ jTileStart = jTileStart + ny
+ end do
+ iTileStart = iTileStart + nx
+ end do
 
+ if (ncats == 1) then
+    field(:) = field(:) / num(1,:)
+ else
+    do i=1,nCellsSolve
+        field(i) = 0
+        do j=1,ncats
+            if (num(j, i) > num(int(field(i)), i)) then
+                field(i) = j
+            end if
+        end do
+    end do
+ end if
 
+ write (0,*) "End subroutine foo2"
+ !TODO//Deallocate stuff
+ end subroutine foo2
 
+ function nInsideCorners(c_lats, c_lons, radius, nCellsSolve, tree)
+    use kd_tree_mod
+    real(kind=RKIND), dimension(2), intent(in) :: c_lats, c_lons
+    class(kd_tree) :: tree
+    real(kind=RKIND), intent(in) :: radius
+    integer, intent(in) :: nCellsSolve
+    integer :: nInsideCorners
+
+    real(kind=RKIND), dimension(3) :: pt
+   
+    nInsideCorners = 0 
+    call con_lx(c_lats(1), c_lons(1), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+    call con_lx(c_lats(1), c_lons(2), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+    call con_lx(c_lats(2), c_lons(1), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+    call con_lx(c_lats(2), c_lons(2), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+
+ end function nInsideCorners
+
+ 
 
  subroutine foo(geog_data_path, geog_sub_path, nx, ny, nz, nh, nCells, nCellsSolve, nVertices, latCell, lonCell, &
                 latVertex, lonVertex, verticesOnCell, cellsOnCell, nEdgesOnCell, field, nCats, isigned, endian, scalefactor, wordsize)
@@ -1039,9 +1157,11 @@ lon_pt = -179.99583 + (i-1) * tdim
  scalefactor = 1.0
  geog_sub_path = 'topo_30s/'
 
+ call foo2(mesh, dims, configs, geog_data_path, geog_sub_path, nx, ny, nz, 3, &
+                 field, 1, isigned, endian, scalefactor, wordsize)
 
- call foo(geog_data_path, geog_sub_path, nx, ny, nz, 3, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
-                verticesOnCell, cellsOnCell, nEdgesOnCell, field, 1, isigned, endian, scalefactor, wordsize)
+! call foo(geog_data_path, geog_sub_path, nx, ny, nz, 3, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
+!                verticesOnCell, cellsOnCell, nEdgesOnCell, field, 1, isigned, endian, scalefactor, wordsize)
  ter(1:nCells) = field(:)
  if (associated(field)) deallocate(field)
  call MPI_BARRIER(MPI_COMM_WORLD, istatus)
@@ -1118,8 +1238,10 @@ lon_pt = -179.99583 + (i-1) * tdim
  wordsize = 1
  scalefactor = 1.0
 
- call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
-                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
+ call foo2(mesh, dims, configs, geog_data_path, geog_sub_path, nx, ny, nz, 0, &
+                 field, ismax_lu, isigned, endian, scalefactor, wordsize)
+! call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
+!                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
  lu_index(1:nCells) = int(field(:))
  if (associated(field)) deallocate(field)
 
@@ -1191,11 +1313,11 @@ lon_pt = -179.99583 + (i-1) * tdim
  scalefactor = 1.0
  soilcat_top(:) = 0.0
 
- geog_sub_path = 'soiltype_top_30s/'
- call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
-                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
- soilcat_top(1:nCells) = int(field(:))
- if (associated(field)) deallocate(field)
+! geog_sub_path = 'soiltype_top_30s/'
+! call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
+!                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
+! soilcat_top(1:nCells) = int(field(:))
+! if (associated(field)) deallocate(field)
 
  write(0,*) '--- end interpolate SOILCAT_TOP'
 
@@ -1212,12 +1334,12 @@ lon_pt = -179.99583 + (i-1) * tdim
  scalefactor = 1.0
  soilcat_bot(:) = 0.0
 
- geog_sub_path = 'soiltype_bot_30s/'
- call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
-                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
- soilcat_bot(1:nCells) = int(field(:))
- if (associated(field)) deallocate(field)
-
+! geog_sub_path = 'soiltype_bot_30s/'
+! call foo(geog_data_path, geog_sub_path, nx, ny, nz, 0, nCells, nCellsSolve, nVertices, latCell, lonCell, latVertex, lonVertex, &
+!                verticesOnCell, cellsOnCell, nEdgesOnCell, field, ismax_lu, isigned, endian, scalefactor, wordsize)
+! soilcat_bot(1:nCells) = int(field(:))
+! if (associated(field)) deallocate(field)
+!
  write(0,*) '--- end interpolate SOILCAT_BOT'
 
 
