@@ -253,7 +253,7 @@
  do j=1,nEdgesOnCell(i)
  do k=1,vertexDegree
     temp = cellsOnVertex(k, verticesOnCell(j,i))
-    if(temp <= nCellsSolve) then
+    if(temp == nCells) then
         keyptr => int_key(0,temp)
         if (.not. bvertslist%contains(keyptr)) then
             call bvertslist%insert(keyptr)
@@ -373,10 +373,10 @@
             if(latVertex(borderVertices(v)) <= c_lats(2) .and. latVertex(borderVertices(v)) >= c_lats(1) .and.&
                lonVertex(borderVertices(v)) <= c_lons(2) .and. lonVertex(borderVertices(v)) >= c_lons(1)) then
                 
-                iCheckStart = 1
-                iCheckEnd = nx
-                jCheckStart = 1
-                jCheckEnd = ny
+                iCheckStart = merge(iRegionStart-iTileStart+1, 1, iRegionStart > iTileStart)
+                iCheckEnd = merge(iRegionEnd-iTileStart+1, nx, iRegionEnd < iTileEnd)
+                jCheckStart = merge(jRegionStart-jTileStart+1, 1, jRegionStart > jTileStart)
+                jCheckEnd = merge(jRegionEnd-jTileStart+1, nx, jRegionEnd < jTileEnd)
                 exit
             end if
         end do
