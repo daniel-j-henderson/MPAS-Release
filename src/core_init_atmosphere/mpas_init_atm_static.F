@@ -22,10 +22,294 @@
  public:: init_atm_static,           &
           init_atm_static_orogwd,    &
           init_atm_check_read_error, &
-          nearest_cell,              &
+          nearest_cell_greedy,              &
           sphere_distance
 
  contains
+
+ subroutine interp_field(mesh, dims, configs, geog_data_path, geog_sub_path, nx, ny, nz, nh, &
+                         field, ncats, isigned, endian, scalefactor, wordsize)
+ use kd_tree_mod
+
+ type (mpas_pool_type), intent(inout) :: mesh
+ type (mpas_pool_type), intent(in) :: dims
+ type (mpas_pool_type), intent(in) :: configs
+ character(len=*), intent(in) :: geog_data_path, geog_sub_path
+ integer, intent(in) :: nx, ny, nz, nh, ncats
+ real (kind=RKIND), dimension(:), pointer :: field
+ integer, intent(in) :: endian, isigned, wordsize
+ real(kind=4), intent(in):: scalefactor
+
+ real(kind=4),dimension(:,:,:),allocatable:: rarray
+
+ integer, pointer :: nCells, nCellsSolve, nEdges, nVertices, maxEdges, vertexDegree
+ real (kind=RKIND), pointer :: sphere_radius
+ 
+ integer, dimension(:), pointer :: nEdgesOnCell
+ integer, dimension(:,:), pointer :: cellsOnCell, verticesOnCell, cellsOnVertex
+ real (kind=RKIND), dimension(:), pointer :: xCell, yCell, zCell
+ real (kind=RKIND), dimension(:), pointer :: xVertex, yVertex, zVertex
+ real (kind=RKIND), dimension(:), pointer :: xEdge, yEdge, zEdge
+ real (kind=RKIND), dimension(:), pointer :: latCell, lonCell
+ real (kind=RKIND), dimension(:), pointer :: latVertex, lonVertex
+ real (kind=RKIND), dimension(:), pointer :: latEdge, lonEdge
+ real (kind=RKIND), dimension(:,:), pointer :: points 
+
+ character(len=StrKIND) :: fname
+
+ integer, dimension(:,:), allocatable :: num 
+
+ integer :: i, j, k, l, v, outerRing, temp
+ integer :: iTileStart, jTileStart, iTileEnd, jTileEnd
+ integer :: iRegionStart, jRegionStart, iRegionEnd, jRegionEnd
+ integer :: iPoint, jPoint, iCell, istatus
+ logical :: found, date_line
+ real (kind=RKIND), parameter :: tdim = 0.0083333333
+ real (kind=RKIND) :: lat_min, lon_min, lat_max, lon_max, lat_pt, lon_pt
+ real (kind=RKIND), dimension(2) :: clats, clons
+ type(kd_tree) :: cell_tree
+
+
+ !call mpas_pool_get_array(mesh, 'xCell', xCell)
+ !call mpas_pool_get_array(mesh, 'yCell', yCell)
+ !call mpas_pool_get_array(mesh, 'zCell', zCell)
+ !call mpas_pool_get_array(mesh, 'xVertex', xVertex)
+ !call mpas_pool_get_array(mesh, 'yVertex', yVertex)
+ !call mpas_pool_get_array(mesh, 'zVertex', zVertex)
+ call mpas_pool_get_array(mesh, 'xEdge', xEdge)
+ call mpas_pool_get_array(mesh, 'yEdge', yEdge)
+ call mpas_pool_get_array(mesh, 'zEdge', zEdge)
+ call mpas_pool_get_array(mesh, 'latCell', latCell)
+ call mpas_pool_get_array(mesh, 'lonCell', lonCell)
+ call mpas_pool_get_array(mesh, 'latEdge', latEdge)
+ call mpas_pool_get_array(mesh, 'lonEdge', lonEdge)
+ call mpas_pool_get_array(mesh, 'latVertex', latVertex)
+ call mpas_pool_get_array(mesh, 'lonVertex', lonVertex)
+ 
+ call mpas_pool_get_array(mesh, 'nEdgesOnCell', nEdgesOnCell)
+ call mpas_pool_get_array(mesh, 'cellsOnCell', cellsOnCell)
+ call mpas_pool_get_array(mesh, 'verticesOnCell', verticesOnCell)
+ call mpas_pool_get_array(mesh, 'cellsOnVertex', cellsOnVertex)
+
+ call mpas_pool_get_config(mesh, 'sphere_radius', sphere_radius)
+
+ call mpas_pool_get_dimension(dims, 'nCells', nCells)
+ call mpas_pool_get_dimension(dims, 'nCellsSolve', nCellsSolve)
+ call mpas_pool_get_dimension(dims, 'nEdges', nEdges)
+ call mpas_pool_get_dimension(dims, 'nVertices', nVertices)
+ call mpas_pool_get_dimension(dims, 'maxEdges', maxEdges)
+ call mpas_pool_get_dimension(dims, 'vertexDegree', vertexDegree)
+
+
+! Make sure we are doing everything without respect to the radius
+! if (sqrt(xCell(i)**2 + yCell(i)**2 + zCell(i)**2) .ne. 1.0) then
+!   nullify(xCell, yCell, zCell, xEdge, yEdge, zEdge, xVertex, yVertex, zVertex)
+ 
+ allocate(xCell(nCells), yCell(nCells), zCell(nCells))
+ do i=1, nCells
+   call con_lx(latCell(i), lonCell(i), 1.0, xCell(i), yCell(i), zCell(i))
+ end do
+
+ allocate(xVertex(nVertices), yVertex(nVertices), zVertex(nVertices))
+ do i=1, nVertices
+   call con_lx(latVertex(i), lonVertex(i), 1.0, xVertex(i), yVertex(i), zVertex(i))
+ end do
+
+ allocate(points(3, nCells))
+ do i=1, nCells
+    points(:,i) = (/xCell(i), yCell(i), zCell(i)/)
+ end do
+ call cell_tree%create_tree(points)
+
+! Quick check: confirm that the outer cells are in order
+
+ if(associated(field)) nullify(field)
+ allocate(field(nCells))
+ allocate(rarray(nx+2*nh, ny+2*nh, nz))
+ allocate(num(0:ncats, nCells))
+
+ write (0,*) "nCells, nCellsSolve:", nCells, nCellsSolve
+
+ outerRing = 0
+ do i=nCellsSolve+1, nCells
+ do j=1,nEdgesOnCell(i)
+     do k=1,vertexDegree
+        temp = cellsOnVertex(k, verticesOnCell(j,i))
+        if (temp == nCells+1 .and. outerRing == 0) outerRing = i
+     end do
+ end do
+ end do
+
+ do i=nCellsSolve+1, nCells
+    found = .false.
+    do j=1, nEdgesOnCell(i)
+        if (cellsOnCell(j, i) <= nCellsSolve) found = .true.
+    end do
+    if ((found .and. i >=outerRing) .or. ((.not. found) .and. i < outerRing)) write (0,*) "outerRing is wrong", found, i, outerRing
+    found = .false.
+    do j=1, nEdgesOnCell(i)
+        if (cellsOnCell(j, i) == nCells+1) found = .true.
+    end do
+    if ((found .and. i <outerRing) .or. ((.not. found) .and. i >= outerRing)) then
+      write (0,*) "outerRing is wrong", found, i, outerRing, nCells
+      write (0,*) cellsOnCell(:, i)
+    end if
+
+ end do
+
+ field(:) = 0
+
+
+
+
+
+
+ lat_min = 100
+ lon_min = 100
+ lat_max = -100
+ lon_max = -100
+
+ date_line = .false.
+ do i=nCellsSolve, nCells
+   if(lonCell(i) > lon_max) lon_max = lonCell(i)
+   if(lonCell(i) < lon_min) lon_min = lonCell(i)
+   if(latCell(i) > lat_max) lat_max = latCell(i)
+   if(latCell(i) < lat_min) lat_min = latCell(i)
+   
+   do j = 1, nEdgesOnCell(i)
+      if(abs(lonCell(i) - lonCell(cellsOnCell(j, i))) > PI / 6) date_line = .true. 
+   end do
+ end do
+
+ if (date_line) then
+    do i=nCellsSolve, nCells
+      lon_pt = lonCell(i)
+      if(lon_pt < PI) lon_pt = lon_pt + 2*PI
+      if(lon_pt > lon_max) lon_max = lon_pt
+      if(lon_pt < lon_min) lon_min = lon_pt
+    end do
+ end if
+
+ iRegionStart = floor((lon_min * 180.0 / PI + 180.0) / tdim)
+ iRegionEnd = ceiling((lon_max * 180.0 / PI + 180.0) / tdim)
+ jRegionStart = floor((lat_min * 180.0 / PI +  90.0) / tdim)
+ jRegionEnd = ceiling((lat_max * 180.0 / PI +  90.0) / tdim)
+
+ iTileStart = iRegionStart - mod(iRegionStart, nx) + 1
+ jTileStart = jRegionStart - mod(jRegionStart, ny) + 1
+
+
+ write (0,*) "lon_min, lon_max:", lon_min, lon_max
+ write (0,*) "lat_min, lat_max:", lat_min, lat_max
+ write (0,*) "iRegionStart, End:", iRegionStart, iRegionEnd
+ write (0,*) "jRegionStart, End:", jRegionStart, jRegionEnd
+ write (0,*) "iTileStart", iTileStart
+ write (0,*) "jTileStart", jTileStart
+
+
+ do while (iTileStart <= iRegionEnd)
+   jTileStart = jRegionStart - mod(jRegionStart, ny) + 1
+   iTileEnd = iTileStart + nx - 1
+ do while (jTileStart <= jRegionEnd)
+   jTileEnd = jTileStart + ny - 1
+
+   clons(1) = -179.99583 + (iTileStart - 1) * tdim
+   clons(2) = -179.99583 + (iTileEnd - 1) * tdim
+   clats(1) = -89.99583 + (jTileStart - 1) * tdim
+   clats(2) = -89.99583 + (jTileEnd - 1) * tdim
+   clats = clats * PI / 180.0
+   clons = clons * PI / 180.0
+   !if(nInsideCorners(clats, clons, 1.0, outerRing, cell_tree) >= 0) then 
+       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+             trim(geog_sub_path),mod(iTileStart,43200),'-',mod(iTileStart+nx-1-1,43200)+1,'.',jTileStart,'-',jTileEnd
+       write(0,*) trim(fname)
+
+       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+                         scalefactor,wordsize,istatus)
+       call init_atm_check_read_error(istatus, fname)
+
+      iCell = 1
+      l = 0
+      do iPoint = 1, nx
+         lon_pt = -179.99583 + (iTileStart + iPoint - 2) * tdim
+         lon_pt = lon_pt * PI / 180.0
+      do jPoint = 1, ny
+         lat_pt =  -89.99583 + (jTileStart + jPoint - 2) * tdim
+         lat_pt = lat_pt * PI / 180.0
+
+         iCell = nearest_cell_greedy(lat_pt,lon_pt,iCell,nCells,maxEdges, &
+                               nEdgesOnCell,cellsOnCell, &
+                               latCell,lonCell)
+         if (iCell <= nCellsSolve) then
+            l = l + 1
+            if (ncats == 1) then
+               num(1, iCell) = num(1, iCell) + 1
+               field(iCell) = field(iCell) + rarray(iPoint + nh, jPoint + nh, 1)
+            else
+               num(int(rarray(iPoint + nh, jPoint + nh, 1)), iCell) = num(int(rarray(iPoint + nh, jPoint + nh, 1)), iCell) + 1
+            end if
+         end if
+      end do
+      end do
+      write (0,*) "Placed value ", l, " times for this tile"
+   !else
+   !   write (0,*) "Skipping a tile"
+   !end if
+
+   jTileStart = jTileStart + ny
+ end do
+   iTileStart = iTileStart + nx
+ end do
+
+ if (ncats == 1) then
+   where(num(1, :) .ne. 0) field(:) = field(:) / num(1,:)
+ else
+   do i=1, nCells
+      k = num(0, i)
+      field(i) = 0
+      do j=1, ncats
+         if (num(j, i) > k) then
+            k = num(j, i)
+            field(i) = j
+         end if
+      end do
+   end do
+ end if
+   ! Get tile
+   ! for each tile point, 
+      ! determine nearest cell
+      ! if <= nCellsSolve, place
+   
+ 
+
+
+! Determine region bounding box of lat lon
+   ! Determine the outer layer halo cell centers
+ end subroutine interp_field
+
+
+ function nInsideCorners(c_lats, c_lons, radius, nCellsSolve, tree)
+    use kd_tree_mod
+    real(kind=RKIND), dimension(2), intent(in) :: c_lats, c_lons
+    class(kd_tree) :: tree
+    real(kind=RKIND), intent(in) :: radius
+    integer, intent(in) :: nCellsSolve
+    integer :: nInsideCorners
+
+    real(kind=RKIND), dimension(3) :: pt
+
+    nInsideCorners = 0
+    call con_lx(c_lats(1), c_lons(1), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+    call con_lx(c_lats(1), c_lons(2), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+    call con_lx(c_lats(2), c_lons(1), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+    call con_lx(c_lats(2), c_lons(2), radius, pt(1), pt(2), pt(3))
+    if (tree%nearest_cell(pt) <= nCellsSolve) nInsideCorners = nInsideCorners+1
+
+ end function nInsideCorners
+
 
 !==================================================================================================
  subroutine init_atm_static(mesh, dims, configs)
@@ -81,7 +365,7 @@
  real (kind=RKIND), dimension(:), pointer :: latEdge, lonEdge
  real (kind=RKIND), dimension(:), pointer :: fEdge, fVertex
 
- real (kind=RKIND), dimension(:), pointer :: ter
+ real (kind=RKIND), dimension(:), pointer :: ter, field
  real (kind=RKIND), dimension(:), pointer :: soiltemp
  real (kind=RKIND), dimension(:), pointer :: snoalb
  real (kind=RKIND), dimension(:), pointer :: shdmin, shdmax
@@ -220,577 +504,583 @@
 !
 ! Interpolate HGT
 !
-!nx = 126
-!ny = 126
- nx = 1206
- ny = 1206
+
+
+
+ nx = 1200
+ ny = 1200
  nz = 1
  isigned  = 1
  endian   = 0
  wordsize = 2
  scalefactor = 1.0
- allocate(rarray(nx,ny,nz))
- allocate(nhs(nCells))
- nhs(:) = 0
- ter(:) = 0.0
+ geog_sub_path = 'topo_30s/'
+ call interp_field(mesh, dims, configs, geog_data_path, geog_sub_path, nx, ny, nz, 3, &
+                         field, 1, isigned, endian, scalefactor, wordsize)
 
- do jTileStart = 1,20401,ny-6
-    jTileEnd = jTileStart + ny - 1 - 6
-
-    do iTileStart=1,42001,nx-6
-       iTileEnd = iTileStart + nx - 1 - 6
-       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-             'topo_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-       write(0,*) trim(fname)
-
-       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                         scalefactor,wordsize,istatus)
-       call init_atm_check_read_error(istatus, fname)
-
-       iPoint = 1
-       do j=4,ny-3
-       do i=4,nx-3
-          lat_pt = -89.99583  + (jTileStart + j - 5) * 0.0083333333
-          lon_pt = -179.99583 + (iTileStart + i - 5) * 0.0083333333
-          lat_pt = lat_pt * PI / 180.0
-          lon_pt = lon_pt * PI / 180.0
-
-          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-                                nEdgesOnCell,cellsOnCell, &
-                                latCell,lonCell)
-          ter(iPoint) = ter(iPoint) + rarray(i,j,1)
-          nhs(iPoint) = nhs(iPoint) + 1
-       end do
-       end do
-
-    end do
- end do
-
- do iCell = 1,nCells
-    ter(iCell) = ter(iCell) / real(nhs(iCell))
- end do
- deallocate(rarray)
- deallocate(nhs)
+ ter(1:nCells) = field(:)
+! allocate(rarray(nx,ny,nz))
+! allocate(nhs(nCells))
+! nhs(:) = 0
+! ter(:) = 0.0
+!
+! do jTileStart = 1,20401,ny-6
+!    jTileEnd = jTileStart + ny - 1 - 6
+!
+!    do iTileStart=1,42001,nx-6
+!       iTileEnd = iTileStart + nx - 1 - 6
+!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!             'topo_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
+!       write(0,*) trim(fname)
+!
+!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                         scalefactor,wordsize,istatus)
+!       call init_atm_check_read_error(istatus, fname)
+!
+!       iPoint = 1
+!       do j=4,ny-3
+!       do i=4,nx-3
+!          lat_pt = -89.99583  + (jTileStart + j - 5) * 0.0083333333
+!          lon_pt = -179.99583 + (iTileStart + i - 5) * 0.0083333333
+!          lat_pt = lat_pt * PI / 180.0
+!          lon_pt = lon_pt * PI / 180.0
+!
+!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
+!                                nEdgesOnCell,cellsOnCell, &
+!                                latCell,lonCell)
+!          ter(iPoint) = ter(iPoint) + rarray(i,j,1)
+!          nhs(iPoint) = nhs(iPoint) + 1
+!       end do
+!       end do
+!
+!    end do
+! end do
+!
+! do iCell = 1,nCells
+!    ter(iCell) = ter(iCell) / real(nhs(iCell))
+! end do
+! deallocate(rarray)
+! deallocate(nhs)
  write(0,*) '--- end interpolate TER'
 
 
 !
 ! Interpolate LU_INDEX
 !
- surface_input_select1: select case(trim(config_landuse_data))
-    case('USGS')
-       geog_sub_path = 'landuse_30s/'
-    case('MODIFIED_IGBP_MODIS_NOAH')
-       geog_sub_path = 'modis_landuse_20class_30s/'
-    case default
-       write(0,*) '*****************************************************************'
-       write(0,*) 'Invalid land use dataset '''//trim(config_landuse_data)//''' selected for config_landuse_data'
-       write(0,*) '   Possible options are: ''USGS'', ''MODIFIED_IGBP_MODIS_NOAH'''
-       write(0,*) '*****************************************************************'
-       call mpas_dmpar_global_abort('Please correct the namelist.')
- end select surface_input_select1
- nx = 1200
- ny = 1200
- nz = 1
- isigned  = 1
- endian   = 0
- wordsize = 1
- scalefactor = 1.0
- allocate(rarray(nx,ny,nz))
- allocate(ncat(ismax_lu,nCells))
- ncat(:,:) = 0
- lu_index(:) = 0.0
-
- do jTileStart = 1,20401,ny
-    jTileEnd = jTileStart + ny - 1
-
-    do iTileStart = 1,42001,nx
-       iTileEnd = iTileStart + nx - 1
-       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-             trim(geog_sub_path),iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-       write(0,*) trim(fname)
-
-       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                         scalefactor,wordsize,istatus)
-       call init_atm_check_read_error(istatus, fname)
-
-       iPoint = 1
-       do j=1,ny
-       do i=1,nx
+! surface_input_select1: select case(trim(config_landuse_data))
+!    case('USGS')
+!       geog_sub_path = 'landuse_30s/'
+!    case('MODIFIED_IGBP_MODIS_NOAH')
+!       geog_sub_path = 'modis_landuse_20class_30s/'
+!    case default
+!       write(0,*) '*****************************************************************'
+!       write(0,*) 'Invalid land use dataset '''//trim(config_landuse_data)//''' selected for config_landuse_data'
+!       write(0,*) '   Possible options are: ''USGS'', ''MODIFIED_IGBP_MODIS_NOAH'''
+!       write(0,*) '*****************************************************************'
+!       call mpas_dmpar_global_abort('Please correct the namelist.')
+! end select surface_input_select1
+! nx = 1200
+! ny = 1200
+! nz = 1
+! isigned  = 1
+! endian   = 0
+! wordsize = 1
+! scalefactor = 1.0
+! allocate(rarray(nx,ny,nz))
+! allocate(ncat(ismax_lu,nCells))
+! ncat(:,:) = 0
+! lu_index(:) = 0.0
 !
-! The MODIS dataset appears to have zeros at the South Pole, possibly other places, too
+! do jTileStart = 1,20401,ny
+!    jTileEnd = jTileStart + ny - 1
 !
-if (rarray(i,j,1) == 0) cycle
-
-          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
-          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
-          lat_pt = lat_pt * PI / 180.0
-          lon_pt = lon_pt * PI / 180.0
-
-          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-                                nEdgesOnCell,cellsOnCell, &
-                                latCell,lonCell)
-          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
-       end do
-       end do
-
-    end do
- end do
-
- do iCell = 1,nCells
-    lu_index(iCell) = 1
-    do i = 2,ismax_lu
-       if(ncat(i,iCell) > ncat(lu_index(iCell),iCell)) then
-          lu_index(iCell) = i
-       end if
-    end do
- end do
- deallocate(rarray)
- deallocate(ncat)
- write(0,*) '--- end interpolate LU_INDEX'
+!    do iTileStart = 1,42001,nx
+!       iTileEnd = iTileStart + nx - 1
+!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!             trim(geog_sub_path),iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
+!       write(0,*) trim(fname)
+!
+!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                         scalefactor,wordsize,istatus)
+!       call init_atm_check_read_error(istatus, fname)
+!
+!       iPoint = 1
+!       do j=1,ny
+!       do i=1,nx
+!!
+!! The MODIS dataset appears to have zeros at the South Pole, possibly other places, too
+!!
+!if (rarray(i,j,1) == 0) cycle
+!
+!          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
+!          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
+!          lat_pt = lat_pt * PI / 180.0
+!          lon_pt = lon_pt * PI / 180.0
+!
+!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
+!                                nEdgesOnCell,cellsOnCell, &
+!                                latCell,lonCell)
+!          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
+!       end do
+!       end do
+!
+!    end do
+! end do
+!
+! do iCell = 1,nCells
+!    lu_index(iCell) = 1
+!    do i = 2,ismax_lu
+!       if(ncat(i,iCell) > ncat(lu_index(iCell),iCell)) then
+!          lu_index(iCell) = i
+!       end if
+!    end do
+! end do
+! deallocate(rarray)
+! deallocate(ncat)
+! write(0,*) '--- end interpolate LU_INDEX'
 
 
 !
 ! Interpolate SOILCAT_TOP
 !
- nx = 1200
- ny = 1200
- nz = 1
- isigned     = 1
- endian      = 0
- wordsize    = 1
- scalefactor = 1.0
- allocate(rarray(nx,ny,nz))
- allocate(ncat(16,nCells))
- ncat(:,:) = 0
- soilcat_top(:) = 0.0
-
- do jTileStart = 1,20401,ny
-    jTileEnd = jTileStart + ny - 1
-
-    do iTileStart = 1,42001,nx
-       iTileEnd = iTileStart + nx - 1
-       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-             'soiltype_top_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-       write(0,*) trim(fname)
-
-       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                         scalefactor,wordsize,istatus)
-       call init_atm_check_read_error(istatus, fname)
-
-       iPoint = 1
-       do j=1,ny
-       do i=1,nx
-          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
-          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
-          lat_pt = lat_pt * PI / 180.0
-          lon_pt = lon_pt * PI / 180.0
-
-          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-                                nEdgesOnCell,cellsOnCell, &
-                                latCell,lonCell)
-          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
-       end do
-       end do
-
-    end do
- end do
-
- do iCell = 1,nCells
-    soilcat_top(iCell) = 1
-    do i = 2,16
-       if(ncat(i,iCell) > ncat(soilcat_top(iCell),iCell)) then
-          soilcat_top(iCell) = i
-       end if
-    end do
- end do
- deallocate(rarray)
- deallocate(ncat)
- write(0,*) '--- end interpolate SOILCAT_TOP'
-
-
+! nx = 1200
+! ny = 1200
+! nz = 1
+! isigned     = 1
+! endian      = 0
+! wordsize    = 1
+! scalefactor = 1.0
+! allocate(rarray(nx,ny,nz))
+! allocate(ncat(16,nCells))
+! ncat(:,:) = 0
+! soilcat_top(:) = 0.0
 !
-! Interpolate SOILCAT_BOT
+! do jTileStart = 1,20401,ny
+!    jTileEnd = jTileStart + ny - 1
 !
- nx = 1200
- ny = 1200
- nz = 1
- isigned  = 1
- endian   = 0
- wordsize = 1
- scalefactor = 1.0
- allocate(rarray(nx,ny,nz))
- allocate(ncat(16,nCells))
- ncat(:,:) = 0
- soilcat_bot(:) = 0.0
+!    do iTileStart = 1,42001,nx
+!       iTileEnd = iTileStart + nx - 1
+!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!             'soiltype_top_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
+!       write(0,*) trim(fname)
+!
+!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                         scalefactor,wordsize,istatus)
+!       call init_atm_check_read_error(istatus, fname)
+!
+!       iPoint = 1
+!       do j=1,ny
+!       do i=1,nx
+!          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
+!          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
+!          lat_pt = lat_pt * PI / 180.0
+!          lon_pt = lon_pt * PI / 180.0
+!
+!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
+!                                nEdgesOnCell,cellsOnCell, &
+!                                latCell,lonCell)
+!          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
+!       end do
+!       end do
+!
+!    end do
+! end do
+!
+! do iCell = 1,nCells
+!    soilcat_top(iCell) = 1
+!    do i = 2,16
+!       if(ncat(i,iCell) > ncat(soilcat_top(iCell),iCell)) then
+!          soilcat_top(iCell) = i
+!       end if
+!    end do
+! end do
+! deallocate(rarray)
+! deallocate(ncat)
+! write(0,*) '--- end interpolate SOILCAT_TOP'
+!
+!
+!!
+!! Interpolate SOILCAT_BOT
+!!
+! nx = 1200
+! ny = 1200
+! nz = 1
+! isigned  = 1
+! endian   = 0
+! wordsize = 1
+! scalefactor = 1.0
+! allocate(rarray(nx,ny,nz))
+! allocate(ncat(16,nCells))
+! ncat(:,:) = 0
+! soilcat_bot(:) = 0.0
+!
+! do jTileStart = 1,20401,ny
+!    jTileEnd = jTileStart + ny - 1
+!
+!    do iTileStart = 1,42001,nx
+!       iTileEnd = iTileStart + nx - 1
+!       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!             'soiltype_bot_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
+!       write(0,*) trim(fname)
+!
+!       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                         scalefactor,wordsize,istatus)
+!       call init_atm_check_read_error(istatus, fname)
+!
+!       iPoint = 1
+!       do j=1,ny
+!       do i=1,nx
+!          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
+!          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
+!          lat_pt = lat_pt * PI / 180.0
+!          lon_pt = lon_pt * PI / 180.0
+!
+!          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
+!                                nEdgesOnCell,cellsOnCell, &
+!                                latCell,lonCell)
+!          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
+!       end do
+!       end do
+!
+!    end do
+! end do
+!
+! do iCell =1,nCells
+!    soilcat_bot(iCell) = 1
+!    do i = 2,16
+!       if(ncat(i,iCell) > ncat(soilcat_bot(iCell),iCell)) then
+!          soilcat_bot(iCell) = i
+!       end if
+!    end do
+! end do
+! deallocate(rarray)
+! deallocate(ncat)
+! write(0,*) '--- end interpolate SOILCAT_BOT'
 
- do jTileStart = 1,20401,ny
-    jTileEnd = jTileStart + ny - 1
 
-    do iTileStart = 1,42001,nx
-       iTileEnd = iTileStart + nx - 1
-       write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-             'soiltype_bot_30s/',iTileStart,'-',iTileEnd,'.',jTileStart,'-',jTileEnd
-       write(0,*) trim(fname)
-
-       call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                         scalefactor,wordsize,istatus)
-       call init_atm_check_read_error(istatus, fname)
-
-       iPoint = 1
-       do j=1,ny
-       do i=1,nx
-          lat_pt = -89.99583  + (jTileStart + j - 2) * 0.0083333333
-          lon_pt = -179.99583 + (iTileStart + i - 2) * 0.0083333333
-          lat_pt = lat_pt * PI / 180.0
-          lon_pt = lon_pt * PI / 180.0
-
-          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
-                                nEdgesOnCell,cellsOnCell, &
-                                latCell,lonCell)
-          ncat(int(rarray(i,j,1)),iPoint) = ncat(int(rarray(i,j,1)),iPoint) + 1
-       end do
-       end do
-
-    end do
- end do
-
- do iCell =1,nCells
-    soilcat_bot(iCell) = 1
-    do i = 2,16
-       if(ncat(i,iCell) > ncat(soilcat_bot(iCell),iCell)) then
-          soilcat_bot(iCell) = i
-       end if
-    end do
- end do
- deallocate(rarray)
- deallocate(ncat)
- write(0,*) '--- end interpolate SOILCAT_BOT'
-
-
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! KLUDGE TO FIX SOIL TYPE OVER ANTARCTICA
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
- where (lu_index == isice_lu) soilcat_top = 16
- where (lu_index == isice_lu) soilcat_bot = 16
-
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! CORRECT INCONSISTENT SOIL AND LAND USE DATA
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
- do iCell = 1,nCells
-    if (lu_index(iCell) == iswater_lu .or. &
-        soilcat_top(iCell) == 14 .or. &
-        soilcat_bot(iCell) == 14) then
-        if (lu_index(iCell) /= iswater_lu) then
-            write(0,*) 'Turning lu_index into water at ', iCell
-            lu_index(iCell) = iswater_lu
-        end if
-        if (soilcat_top(iCell) /= 14) then
-            write(0,*) 'Turning soilcat_top into water at ', iCell
-            soilcat_top(iCell) = 14
-        end if
-        if (soilcat_bot(iCell) /= 14) then
-            write(0,*) 'Turning soilcat_bot into water at ', iCell
-            soilcat_bot(iCell) = 14
-        end if
-    end if
- end do
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! KLUDGE TO FIX SOIL TYPE OVER ANTARCTICA
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! where (lu_index == isice_lu) soilcat_top = 16
+! where (lu_index == isice_lu) soilcat_bot = 16
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! CORRECT INCONSISTENT SOIL AND LAND USE DATA
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! do iCell = 1,nCells
+!    if (lu_index(iCell) == iswater_lu .or. &
+!        soilcat_top(iCell) == 14 .or. &
+!        soilcat_bot(iCell) == 14) then
+!        if (lu_index(iCell) /= iswater_lu) then
+!            write(0,*) 'Turning lu_index into water at ', iCell
+!            lu_index(iCell) = iswater_lu
+!        end if
+!        if (soilcat_top(iCell) /= 14) then
+!            write(0,*) 'Turning soilcat_top into water at ', iCell
+!            soilcat_top(iCell) = 14
+!        end if
+!        if (soilcat_bot(iCell) /= 14) then
+!            write(0,*) 'Turning soilcat_bot into water at ', iCell
+!            soilcat_bot(iCell) = 14
+!        end if
+!    end if
+! end do
 
 
 !
 ! Derive LANDMASK
 !
- landmask(:) = 0
- do iCell=1, nCells
-    if (lu_index(iCell) /= iswater_lu) landmask(iCell) = 1
- end do
- write(0,*) '--- end interpolate LANDMASK'
+! landmask(:) = 0
+! do iCell=1, nCells
+!    if (lu_index(iCell) /= iswater_lu) landmask(iCell) = 1
+! end do
+! write(0,*) '--- end interpolate LANDMASK'
 
 
 !
 ! Interpolate SOILTEMP:
 !
- nx = 186
- ny = 186
- nz = 1
- isigned  = 0
- endian   = 0
- wordsize = 2
- scalefactor = 0.01
- allocate(rarray(nx,ny,nz))
- allocate(soiltemp_1deg(-2:363,-2:183))
- soiltemp(:) = 0.0
-
- call map_set(PROJ_LATLON, proj,  &
-              latinc = 1.0_RKIND, &
-              loninc = 1.0_RKIND, &
-              knowni = 1.0_RKIND, &
-              knownj = 1.0_RKIND, &
-              lat1 = -89.5_RKIND, &
-              lon1 = -179.5_RKIND)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-       'soiltemp_1deg/',1,'-',180,'.',1,'-',180
- write(0,*) trim(fname)
-
- call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned, endian, &
-                   scalefactor,wordsize,istatus)
- call init_atm_check_read_error(istatus, fname)
- soiltemp_1deg(-2:180,-2:183) = rarray(1:183,1:186,1)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-            'soiltemp_1deg/',181,'-',360,'.',1,'-',180
- write(0,*) trim(fname)
-
- call read_geogrid(fname, len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                        scalefactor,wordsize,istatus)
- call init_atm_check_read_error(istatus,fname)
- soiltemp_1deg(181:363,-2:183) = rarray(4:186,1:186,1)
-
- interp_list(1) = FOUR_POINT
- interp_list(2) = W_AVERAGE4
- interp_list(3) = W_AVERAGE16
- interp_list(4) = SEARCH
- interp_list(5) = 0
-
- do iCell = 1,nCells
-  
-    if(landmask(iCell) == 1) then
-       lat = latCell(iCell) * DEG_PER_RAD
-       lon = lonCell(iCell) * DEG_PER_RAD
-       call latlon_to_ij(proj, lat, lon, x, y)
-       if(x < 0.5) then
-          lon = lon + 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       else if (x >= 360.5) then
-          lon = lon - 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       end if
-       if (y < 1.0) y = 1.0
-       if (y > 179.0) y = 179.0
-       soiltemp(iCell) = interp_sequence(x,y,1,soiltemp_1deg,-2,363,-2,183, &
-                                           1,1,0.0_RKIND,interp_list,1)
-    else
-       soiltemp(iCell) = 0.0
-    end if
-
- end do
- deallocate(rarray)
- deallocate(soiltemp_1deg)
- write(0,*) '--- end interpolate SOILTEMP'
-
-
+! nx = 186
+! ny = 186
+! nz = 1
+! isigned  = 0
+! endian   = 0
+! wordsize = 2
+! scalefactor = 0.01
+! allocate(rarray(nx,ny,nz))
+! allocate(soiltemp_1deg(-2:363,-2:183))
+! soiltemp(:) = 0.0
 !
-! Interpolate SNOALB
+! call map_set(PROJ_LATLON, proj,  &
+!              latinc = 1.0_RKIND, &
+!              loninc = 1.0_RKIND, &
+!              knowni = 1.0_RKIND, &
+!              knownj = 1.0_RKIND, &
+!              lat1 = -89.5_RKIND, &
+!              lon1 = -179.5_RKIND)
 !
- nx = 186
- ny = 186
- nz = 1
- isigned     = 0
- endian      = 0
- wordsize    = 1
- scalefactor = 1.0
- allocate(rarray(nx,ny,nz))
- allocate(maxsnowalb(-2:363,-2:183))
- snoalb(:) = 0.0
-
- call map_set(PROJ_LATLON, proj,  &
-              latinc = 1.0_RKIND, &
-              loninc = 1.0_RKIND, &
-              knowni = 1.0_RKIND, &
-              knownj = 1.0_RKIND, &
-              lat1 = -89.5_RKIND, &
-              lon1 = -179.5_RKIND)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-       'maxsnowalb/',1,'-',180,'.',1,'-',180
- write(0,*) trim(fname)
-
- call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, & 
-                   scalefactor,wordsize,istatus)
- call init_atm_check_read_error(istatus,fname)
- maxsnowalb(-2:180,-2:183) = rarray(1:183,1:186,1)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-       'maxsnowalb/',181,'-',360,'.',1,'-',180
- write(0,*) trim(fname)
-
- call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                   scalefactor,wordsize,istatus)
- call init_atm_check_read_error(istatus, fname)
- maxsnowalb(181:363,-2:183) = rarray(4:186,1:186,1)
-
- interp_list(1) = FOUR_POINT
- interp_list(2) = W_AVERAGE4
- interp_list(3) = W_AVERAGE16
- interp_list(4) = SEARCH
- interp_list(5) = 0
-
- do iCell = 1,nCells
-  
-    if(landmask(iCell) == 1) then
-       lat = latCell(iCell) * DEG_PER_RAD
-       lon = lonCell(iCell) * DEG_PER_RAD
-       call latlon_to_ij(proj, lat, lon, x, y)
-       if(x < 0.5) then
-          lon = lon + 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       else if (x >= 360.5) then
-          lon = lon - 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       end if
-       if (y < 1.0) y = 1.0
-       if (y > 179.0) y = 179.0
-       snoalb(iCell) = interp_sequence(x,y,1,maxsnowalb,-2,363,-2,183, &
-                                         1,1,0.0_RKIND,interp_list,1)
-    else
-       snoalb(iCell) = 0.0
-    end if
-
- end do
- snoalb(:) = snoalb(:) / 100.0
- deallocate(rarray)
- deallocate(maxsnowalb)
- write(0,*) '--- end interpolate SNOALB'
-
-
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!       'soiltemp_1deg/',1,'-',180,'.',1,'-',180
+! write(0,*) trim(fname)
 !
-! Interpolate GREENFRAC
+! call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned, endian, &
+!                   scalefactor,wordsize,istatus)
+! call init_atm_check_read_error(istatus, fname)
+! soiltemp_1deg(-2:180,-2:183) = rarray(1:183,1:186,1)
 !
- nx = 1256
- ny = 1256
- nz = 12
- isigned     = 0
- endian      = 0
- wordsize    = 1
- scalefactor = 1.0
- allocate(rarray(nx,ny,nz))
- allocate(vegfra(-2:2503,-2:1253,12))
- greenfrac(:,:) = 0.0
-
- call map_set(PROJ_LATLON, proj,    &
-              latinc = 0.144_RKIND, &
-              loninc = 0.144_RKIND, &
-              knowni = 1.0_RKIND,   &
-              knownj = 1.0_RKIND,   &
-              lat1 = -89.928_RKIND, &
-              lon1 = -179.928_RKIND)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-       'greenfrac/',1,'-',1250,'.',1,'-',1250
- write(0,*) trim(fname)
-
- call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, & 
-                   scalefactor,wordsize,istatus)
- call init_atm_check_read_error(istatus,fname)
- vegfra(-2:1250,-2:1253,1:12) = rarray(1:1253,1:1256,1:12)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-       'greenfrac/',1251,'-',2500,'.',1,'-',1250
- write(0,*) trim(fname)
-
- call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                   scalefactor,wordsize,istatus)
- call init_atm_check_read_error(istatus,fname)
- vegfra(1251:2503,-2:1253,1:12) = rarray(4:1256,1:1256,1:12)
-
- do iCell = 1,nCells
-
-    if (landmask(iCell) == 1) then
-       lat = latCell(iCell) * DEG_PER_RAD
-       lon = lonCell(iCell) * DEG_PER_RAD
-       call latlon_to_ij(proj, lat, lon, x, y)
-       if(x < 0.5) then
-          lon = lon + 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       else if(x >= 2500.5) then
-          lon = lon - 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       end if
-       if (y < 1.0) y = 1.0
-       if (y > 1249.0) y = 1249.0
-       do k = 1,12
-          greenfrac(k,iCell) = interp_sequence(x,y,k,vegfra,-2,2503,-2,1253, &
-                                                 1,12,-1.e30_RKIND,interp_list,1)
-       end do
-    else
-       greenfrac(:,iCell) = 0.0
-    end if
-    shdmin(iCell) = minval(greenfrac(:,iCell))
-    shdmax(iCell) = maxval(greenfrac(:,iCell))
-      
- end do
- deallocate(rarray)
- deallocate(vegfra)
- write(0,*) '--- end interpolate GREENFRAC'
-
-
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!            'soiltemp_1deg/',181,'-',360,'.',1,'-',180
+! write(0,*) trim(fname)
 !
-! Interpolate ALBEDO12M
+! call read_geogrid(fname, len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                        scalefactor,wordsize,istatus)
+! call init_atm_check_read_error(istatus,fname)
+! soiltemp_1deg(181:363,-2:183) = rarray(4:186,1:186,1)
 !
- nx = 1256
- ny = 1256
- nz = 12
- isigned     = 0
- endian      = 0
- wordsize    = 1
- scalefactor = 1.0
- allocate(rarray(nx,ny,nz))
- allocate(vegfra(-2:2503,-2:1253,12))
- albedo12m(:,:) = 0.0
-
- call map_set(PROJ_LATLON, proj,    &
-              latinc = 0.144_RKIND, &
-              loninc = 0.144_RKIND, &
-              knowni = 1.0_RKIND,   &
-              knownj = 1.0_RKIND,   &
-              lat1 = -89.928_RKIND, &
-              lon1 = -179.928_RKIND)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-       'albedo_ncep/',1,'-',1250,'.',1,'-',1250
- write(0,*) trim(fname)
-
- call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
-                   scalefactor, wordsize, istatus)
- call init_atm_check_read_error(istatus,fname)
- vegfra(-2:1250,-2:1253,1:12) = rarray(1:1253,1:1256,1:12)
-
- write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
-       'albedo_ncep/',1251,'-',2500,'.',1,'-',1250
- write(0,*) trim(fname)
-
- call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, & 
-                   scalefactor,wordsize,istatus)
- call init_atm_check_read_error(istatus,fname)
- vegfra(1251:2503,-2:1253,1:12) = rarray(4:1256,1:1256,1:12)
-
- do iCell = 1,nCells
-
-    if (landmask(iCell) == 1) then
-       lat = latCell(iCell) * DEG_PER_RAD
-       lon = lonCell(iCell) * DEG_PER_RAD
-       call latlon_to_ij(proj, lat, lon, x, y)
-       if(x < 0.5) then
-          lon = lon + 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       else if(x >= 2500.5) then
-          lon = lon - 360.0
-          call latlon_to_ij(proj, lat, lon, x, y)
-       end if
-       if (y < 1.0) y = 1.0
-       if (y > 1249.0) y = 1249.0
-       do k = 1,12
-          albedo12m(k,iCell) = interp_sequence(x,y,k,vegfra,-2,2503,-2,1253, &
-                                                 1,12,0.0_RKIND,interp_list,1)
-       end do
-    else
-       albedo12m(:,iCell) = 8.0
-    end if
- end do
- deallocate(rarray)
- deallocate(vegfra)
- write(0,*) '--- end interpolate ALBEDO12M'
+! interp_list(1) = FOUR_POINT
+! interp_list(2) = W_AVERAGE4
+! interp_list(3) = W_AVERAGE16
+! interp_list(4) = SEARCH
+! interp_list(5) = 0
+!
+! do iCell = 1,nCells
+!  
+!    if(landmask(iCell) == 1) then
+!       lat = latCell(iCell) * DEG_PER_RAD
+!       lon = lonCell(iCell) * DEG_PER_RAD
+!       call latlon_to_ij(proj, lat, lon, x, y)
+!       if(x < 0.5) then
+!          lon = lon + 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       else if (x >= 360.5) then
+!          lon = lon - 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       end if
+!       if (y < 1.0) y = 1.0
+!       if (y > 179.0) y = 179.0
+!       soiltemp(iCell) = interp_sequence(x,y,1,soiltemp_1deg,-2,363,-2,183, &
+!                                           1,1,0.0_RKIND,interp_list,1)
+!    else
+!       soiltemp(iCell) = 0.0
+!    end if
+!
+! end do
+! deallocate(rarray)
+! deallocate(soiltemp_1deg)
+! write(0,*) '--- end interpolate SOILTEMP'
+!
+!
+!!
+!! Interpolate SNOALB
+!!
+! nx = 186
+! ny = 186
+! nz = 1
+! isigned     = 0
+! endian      = 0
+! wordsize    = 1
+! scalefactor = 1.0
+! allocate(rarray(nx,ny,nz))
+! allocate(maxsnowalb(-2:363,-2:183))
+! snoalb(:) = 0.0
+!
+! call map_set(PROJ_LATLON, proj,  &
+!              latinc = 1.0_RKIND, &
+!              loninc = 1.0_RKIND, &
+!              knowni = 1.0_RKIND, &
+!              knownj = 1.0_RKIND, &
+!              lat1 = -89.5_RKIND, &
+!              lon1 = -179.5_RKIND)
+!
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!       'maxsnowalb/',1,'-',180,'.',1,'-',180
+! write(0,*) trim(fname)
+!
+! call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, & 
+!                   scalefactor,wordsize,istatus)
+! call init_atm_check_read_error(istatus,fname)
+! maxsnowalb(-2:180,-2:183) = rarray(1:183,1:186,1)
+!
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!       'maxsnowalb/',181,'-',360,'.',1,'-',180
+! write(0,*) trim(fname)
+!
+! call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                   scalefactor,wordsize,istatus)
+! call init_atm_check_read_error(istatus, fname)
+! maxsnowalb(181:363,-2:183) = rarray(4:186,1:186,1)
+!
+! interp_list(1) = FOUR_POINT
+! interp_list(2) = W_AVERAGE4
+! interp_list(3) = W_AVERAGE16
+! interp_list(4) = SEARCH
+! interp_list(5) = 0
+!
+! do iCell = 1,nCells
+!  
+!    if(landmask(iCell) == 1) then
+!       lat = latCell(iCell) * DEG_PER_RAD
+!       lon = lonCell(iCell) * DEG_PER_RAD
+!       call latlon_to_ij(proj, lat, lon, x, y)
+!       if(x < 0.5) then
+!          lon = lon + 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       else if (x >= 360.5) then
+!          lon = lon - 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       end if
+!       if (y < 1.0) y = 1.0
+!       if (y > 179.0) y = 179.0
+!       snoalb(iCell) = interp_sequence(x,y,1,maxsnowalb,-2,363,-2,183, &
+!                                         1,1,0.0_RKIND,interp_list,1)
+!    else
+!       snoalb(iCell) = 0.0
+!    end if
+!
+! end do
+! snoalb(:) = snoalb(:) / 100.0
+! deallocate(rarray)
+! deallocate(maxsnowalb)
+! write(0,*) '--- end interpolate SNOALB'
+!
+!
+!!
+!! Interpolate GREENFRAC
+!!
+! nx = 1256
+! ny = 1256
+! nz = 12
+! isigned     = 0
+! endian      = 0
+! wordsize    = 1
+! scalefactor = 1.0
+! allocate(rarray(nx,ny,nz))
+! allocate(vegfra(-2:2503,-2:1253,12))
+! greenfrac(:,:) = 0.0
+!
+! call map_set(PROJ_LATLON, proj,    &
+!              latinc = 0.144_RKIND, &
+!              loninc = 0.144_RKIND, &
+!              knowni = 1.0_RKIND,   &
+!              knownj = 1.0_RKIND,   &
+!              lat1 = -89.928_RKIND, &
+!              lon1 = -179.928_RKIND)
+!
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!       'greenfrac/',1,'-',1250,'.',1,'-',1250
+! write(0,*) trim(fname)
+!
+! call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, & 
+!                   scalefactor,wordsize,istatus)
+! call init_atm_check_read_error(istatus,fname)
+! vegfra(-2:1250,-2:1253,1:12) = rarray(1:1253,1:1256,1:12)
+!
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!       'greenfrac/',1251,'-',2500,'.',1,'-',1250
+! write(0,*) trim(fname)
+!
+! call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                   scalefactor,wordsize,istatus)
+! call init_atm_check_read_error(istatus,fname)
+! vegfra(1251:2503,-2:1253,1:12) = rarray(4:1256,1:1256,1:12)
+!
+! do iCell = 1,nCells
+!
+!    if (landmask(iCell) == 1) then
+!       lat = latCell(iCell) * DEG_PER_RAD
+!       lon = lonCell(iCell) * DEG_PER_RAD
+!       call latlon_to_ij(proj, lat, lon, x, y)
+!       if(x < 0.5) then
+!          lon = lon + 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       else if(x >= 2500.5) then
+!          lon = lon - 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       end if
+!       if (y < 1.0) y = 1.0
+!       if (y > 1249.0) y = 1249.0
+!       do k = 1,12
+!          greenfrac(k,iCell) = interp_sequence(x,y,k,vegfra,-2,2503,-2,1253, &
+!                                                 1,12,-1.e30_RKIND,interp_list,1)
+!       end do
+!    else
+!       greenfrac(:,iCell) = 0.0
+!    end if
+!    shdmin(iCell) = minval(greenfrac(:,iCell))
+!    shdmax(iCell) = maxval(greenfrac(:,iCell))
+!      
+! end do
+! deallocate(rarray)
+! deallocate(vegfra)
+! write(0,*) '--- end interpolate GREENFRAC'
+!
+!
+!!
+!! Interpolate ALBEDO12M
+!!
+! nx = 1256
+! ny = 1256
+! nz = 12
+! isigned     = 0
+! endian      = 0
+! wordsize    = 1
+! scalefactor = 1.0
+! allocate(rarray(nx,ny,nz))
+! allocate(vegfra(-2:2503,-2:1253,12))
+! albedo12m(:,:) = 0.0
+!
+! call map_set(PROJ_LATLON, proj,    &
+!              latinc = 0.144_RKIND, &
+!              loninc = 0.144_RKIND, &
+!              knowni = 1.0_RKIND,   &
+!              knownj = 1.0_RKIND,   &
+!              lat1 = -89.928_RKIND, &
+!              lon1 = -179.928_RKIND)
+!
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!       'albedo_ncep/',1,'-',1250,'.',1,'-',1250
+! write(0,*) trim(fname)
+!
+! call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, &
+!                   scalefactor, wordsize, istatus)
+! call init_atm_check_read_error(istatus,fname)
+! vegfra(-2:1250,-2:1253,1:12) = rarray(1:1253,1:1256,1:12)
+!
+! write(fname,'(a,i5.5,a1,i5.5,a1,i5.5,a1,i5.5)') trim(geog_data_path)// &
+!       'albedo_ncep/',1251,'-',2500,'.',1,'-',1250
+! write(0,*) trim(fname)
+!
+! call read_geogrid(fname,len_trim(fname),rarray,nx,ny,nz,isigned,endian, & 
+!                   scalefactor,wordsize,istatus)
+! call init_atm_check_read_error(istatus,fname)
+! vegfra(1251:2503,-2:1253,1:12) = rarray(4:1256,1:1256,1:12)
+!
+! do iCell = 1,nCells
+!
+!    if (landmask(iCell) == 1) then
+!       lat = latCell(iCell) * DEG_PER_RAD
+!       lon = lonCell(iCell) * DEG_PER_RAD
+!       call latlon_to_ij(proj, lat, lon, x, y)
+!       if(x < 0.5) then
+!          lon = lon + 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       else if(x >= 2500.5) then
+!          lon = lon - 360.0
+!          call latlon_to_ij(proj, lat, lon, x, y)
+!       end if
+!       if (y < 1.0) y = 1.0
+!       if (y > 1249.0) y = 1249.0
+!       do k = 1,12
+!          albedo12m(k,iCell) = interp_sequence(x,y,k,vegfra,-2,2503,-2,1253, &
+!                                                 1,12,0.0_RKIND,interp_list,1)
+!       end do
+!    else
+!       albedo12m(:,iCell) = 8.0
+!    end if
+! end do
+! deallocate(rarray)
+! deallocate(vegfra)
+! write(0,*) '--- end interpolate ALBEDO12M'
 
 
  end subroutine init_atm_static
@@ -921,7 +1211,7 @@ if (rarray(i,j,1) == 0) cycle
           lat_pt = lat_pt * PI / 180.0
           lon_pt = lon_pt * PI / 180.0
 
-          iPoint = nearest_cell(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
+          iPoint = nearest_cell_greedy(lat_pt,lon_pt,iPoint,nCells,maxEdges, &
                                 nEdgesOnCell,cellsOnCell, &
                                 latCell,lonCell)
           varsso(iPoint) = varsso(iPoint) + rarray(i,j,1)
@@ -2027,7 +2317,7 @@ if (rarray(i,j,1) == 0) cycle
  end subroutine init_atm_check_read_error
 
 !==================================================================================================
- integer function nearest_cell(target_lat, target_lon, start_cell, nCells, maxEdges, &
+ integer function nearest_cell_greedy(target_lat, target_lon, start_cell, nCells, maxEdges, &
                                nEdgesOnCell, cellsOnCell, latCell, lonCell)
 !==================================================================================================
  implicit none
@@ -2045,28 +2335,28 @@ if (rarray(i,j,1) == 0) cycle
  real (kind=RKIND) :: current_distance, d
  real (kind=RKIND) :: nearest_distance
 
- nearest_cell = start_cell
+ nearest_cell_greedy = start_cell
  current_cell = -1
 
- do while (nearest_cell /= current_cell)
-    current_cell = nearest_cell
+ do while (nearest_cell_greedy /= current_cell)
+    current_cell = nearest_cell_greedy
     current_distance = sphere_distance(latCell(current_cell), lonCell(current_cell), target_lat, &
                                        target_lon, 1.0_RKIND)
-    nearest_cell = current_cell
+    nearest_cell_greedy = current_cell
     nearest_distance = current_distance
     do i = 1, nEdgesOnCell(current_cell)
        iCell = cellsOnCell(i,current_cell)
        if (iCell <= nCells) then
           d = sphere_distance(latCell(iCell), lonCell(iCell), target_lat, target_lon, 1.0_RKIND)
           if (d < nearest_distance) then
-             nearest_cell = iCell
+             nearest_cell_greedy = iCell
              nearest_distance = d
           end if
        end if
     end do
  end do
 
- end function nearest_cell
+ end function nearest_cell_greedy
 
 !==================================================================================================
  real (kind=RKIND) function sphere_distance(lat1, lon1, lat2, lon2, radius)
@@ -2084,6 +2374,25 @@ if (rarray(i,j,1) == 0) cycle
  sphere_distance = 2.*radius*asin(arg1)
 
  end function sphere_distance
+
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! SUBROUTINE CONVERT_LX
+   !
+   ! Convert (lat,lon) to an (x, y, z) location on a sphere with specified
+   ! radius.
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   subroutine con_lx(lat, lon, radius, x, y, z)
+
+      implicit none
+
+      real (kind=RKIND), intent(in) :: radius, lat, lon
+      real (kind=RKIND), intent(out) :: x, y, z
+
+      z = radius * sin(lat)
+      x = radius * cos(lon) * cos(lat)
+      y = radius * sin(lon) * cos(lat)
+   end subroutine con_lx
+
 
 !==================================================================================================
  end module mpas_init_atm_static
